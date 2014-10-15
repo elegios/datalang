@@ -150,3 +150,13 @@ malloc (uint) -> ([]t)
 In that case pointer[2] would not be allowed, but chunkPointer[2] would.
 *chunkPointer would probably not be allowed.
 
+Having some sort way to use a function/transform in an expression position is
+probably necessary for ease of use. It should only be doable when there is only
+one outargument, otherwise it seems kinda hard to define. Additionally these
+functions should probably be restricted to pure functions, and possibly even to
+'simple' types, ints, floats, bools, etc.
+
+It may seem a strange limitation that it should only work with simple types,
+but it would take care of most important cases, but prevent things that may
+hide some complexity or memory usage. Not sure about this.
+

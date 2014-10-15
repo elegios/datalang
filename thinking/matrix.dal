@@ -1,0 +1,75 @@
+type Matrix<n> struct {
+  ncols uint
+  elems ![]n
+}
+
+// transforms with a single outparameter of a 'simple' type, (int, uint, float, bool,
+// etc) can be called as an expression. Functional purity should probably also be
+// required
+nrows :: (Matrix<n>) -> (uint)
+(mat) nrows (count) {
+  count = mat.elems.cap / mat.ncols
+}
+
+read :: (Matrix<n>, uint, uint) -> (n)
+(m, row, col) -> (element) {
+  assert 0 <= row && row < nrows(m)
+  assert 0 <= col && col < m.ncols
+  element = m.elems[row * m.ncols + col]
+}
+
+// assuming the above about certain transformations writable as expressions this
+// transform would require that n can be multiplied, 0 can be of type n, and n is a
+// simple type.
+mult :: (Matrix<n>, Matrix<n>) -> (Matrix<n>)
+(a, b) mult (c) {
+  assert a.ncols == nrows(b)
+  assert nrows(a) == nrows(c) && b.ncols == c.ncols
+  for i := 0; i < c.elems.cap; i++ {
+    c.elems[i] = 0
+    row := i / c.ncols
+    col := i % c.ncols
+    for j := 0; j < a.ncols; j++ {
+      c.elems[i] += read(a, row, j) * read(b, i, col)
+    }
+  }
+}
+
+alloc :: (uint) -> (Matrix<n>)
+(nrows) alloc (m) {
+  (nrows * m.ncols) malloc (m.elems)
+}
+
+type Hmm<n> struct {
+  q, a, b Matrix<n>
+}
+
+type TrainingData<n> struct {
+  count uint
+  scalingFactors ![]float
+  ems ![]uint
+  alpha, beta Matrix<n>
+}
+
+alloc :: (uint) -> (TrainingData<n>)
+(initalCapacity) alloc (data) {
+  data.count = 0
+  (initialCapacity) malloc (data.scalingFactors)
+}
+
+calcAlpha :: (Matrix<n>, Matrix<n>, Matrix<n>, []uint) -> ([]float, Matrix<n>)
+(q, a, b, ems) calcAlpha (scalingFactors, alpha) {
+  
+}
+
+calcBeta :: (Matrix<n>, Matrix<n>, []uint, []float) -> (Matrix<n>)
+(a, b, ems, scalingFactors) calcBeta (beta) {
+
+}
+
+calcDelta :: (Matrix<n>, Matrix<n>, Matrix<n>, []uint) -> (Matrix<n>)
+(q, a, b, ems) calcDelta (delta) {
+  
+}
+
+estimateNext :: // TODO:
