@@ -45,31 +45,85 @@ type Hmm<n> struct {
 }
 
 type TrainingData<n> struct {
-  count uint
   scalingFactors ![]float
   ems ![]uint
   alpha, beta Matrix<n>
 }
 
-alloc :: (uint) -> (TrainingData<n>)
-(initalCapacity) alloc (data) {
-  data.count = 0
+alloc :: () -> ([]uint, TrainingData<n>)
+() alloc (ems, data) {
+  () move (ems, data.ems)
+  (data.ems.cap) malloc (data.scalingFactors)
   (initialCapacity) malloc (data.scalingFactors)
 }
 
 calcAlpha :: (Matrix<n>, Matrix<n>, Matrix<n>, []uint) -> ([]float, Matrix<n>)
 (q, a, b, ems) calcAlpha (scalingFactors, alpha) {
-  
+  assert scalingFactors.cap >= ems.cap
+  assert nrows(alpha) >= ems.cap
+
+  scalingFactors[0] = 0
+  for i := 0; i < a.ncols; i++ {
+    (0, i, read(b, i, ems[0]) * read(q, 0, i)) write (alpha)
+    scalingFactors[0] += read(alpha, 0, i)
+  }
+  scalingFactors[0] = 1 / scalingFactors[0]
+  for i := 0; i < a.ncols; i++ {
+    (0, i, scalingFactors[0] * read(alpha, 0, i)) write (alpha)
+  }
+
+  for t := 1, t < ems.cap; t++ {
+    scalingFactors[t] = 0
+    for i := 0; i < a.ncols; i++ {
+      (t, i, 0) write (alpha)
+      for j := 0; j < a.nrows; j++ {
+        (t, i, read(a, j, i) * read(alpha, t-1, j)) write (alpha)
+      }
+      (t, i, read(alpha, t, i) * read(b, i, ems[t])) write (alpha)
+      scalingFactors[t] += read(alpha, t, i)
+    }
+    scalingFactors[t] = 1 / scalingFactors[t]
+    for i := 0; i < a.ncols; i++ {
+      (t, i, read(alpha, t, i) * scalingFactors[t]) write (alpha)
+    }
+  }
 }
 
 calcBeta :: (Matrix<n>, Matrix<n>, []uint, []float) -> (Matrix<n>)
 (a, b, ems, scalingFactors) calcBeta (beta) {
+  for i := 0; i < a.ncols; i++ {
+    *read(beta, ems.cap-1, i) = scalingFactors[ems.cap-1]
+  }
 
+  for t := 0; t >= 0; t-- {
+    for i := 0; i < nrows(a); i++ {
+      *read(beta, t, i) = 0;
+      for j := 0; j < a.ncols; j++ {
+        *read(beta, t, i) += read(a, i, j) * read(b, j, ems[t+1]) * read(beta, t+1, j)
+      }
+      *read(beta, t, i) *= scalingFactors[t]
+    }
+  }
 }
 
 calcDelta :: (Matrix<n>, Matrix<n>, Matrix<n>, []uint) -> (Matrix<n>)
 (q, a, b, ems) calcDelta (delta) {
-  
+  for i := 0; i < a.ncols; i++ {
+    *read(delta, 0, i) = read(b, i, ems[0]) * q(0, i)
+  }
+
+  for t := 1; t < ems.cap; t++ {
+    for i := 0; i < a.ncols; i++ {
+      *read(delta, t, i) = 0;
+      for j := 0; j < nrows(a); j++ {
+        p := read(a, j, i) * read(delta, t-1, j)
+        if p > read(delta, t, i) {
+          *read(delta, t, i) = p
+        }
+      }
+      *read(delta, t, i) *= read(b, i, ems[t])
+    }
+  }
 }
 
-estimateNext :: // TODO:
+estimateNext :: ([]TrainingData<n>) -> (Hmm<n>)

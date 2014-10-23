@@ -160,3 +160,38 @@ It may seem a strange limitation that it should only work with simple types,
 but it would take care of most important cases, but prevent things that may
 hide some complexity or memory usage. Not sure about this.
 
+It has become apparent that some nice way to provide a reference to something
+internal to a datastructure would be nice. Overloading [] might be the way to
+go, it would allow things like matrix[row, col] to be a reference to the
+datacell in question. Alternatively transforms with a singe outargument of type
+*t where t is some type might be allowed as lvalues, in which case things would
+be written to the actual value. Example:
+
+type Matrix<n> struct {
+  cells ![]n
+  ncols uint
+}
+
+read :: (Matrix<n>, uint, uint) -> (n)
+(m, row, col) read (v) {
+  v = m.cells[row * m.ncols + col]
+}
+
+read :: (Matrix<n>, uint, uint) -> (*n)
+(m, row, col) read (p) {
+  p = &m.cells[row * m.ncols + col]
+}
+
+// These two would then be equivalent
+factor := 42
+read(matrix, 3, 2) *= factor
+read(matrix, 3, 2) = read(matrix, 3, 2) * factor
+
+Alternatively we just realize that we can dereference the pointer to get
+a usable lvalue (which then needs to be supported, but we already knew that) to
+get what we want:
+
+*read(matrix, 3, 2) *= factor
+
+This of course assumes that the type system can select the correct variation of
+read based on its 'return type'.
