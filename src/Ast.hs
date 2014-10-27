@@ -3,16 +3,20 @@ module Ast where
 data SourceLoc = SourceLoc deriving Show
 data SourceRange = SourceRange SourceLoc SourceLoc deriving Show
 
-data Top = TypeDef String Type SourceRange
-         | TopFunc String FuncDef SourceRange
-         | TopConstant String Literal SourceRange deriving Show
+data Source = Source
+  { functionDefinitions :: [Top FuncDef]
+  , typeDefinitions :: [Top Type]
+  , constantDefinitions :: [Top Literal]
+  }
+
+type Top a = (String, a, SourceRange)
 
 data Type = Idefault | I8 | I16 | I32 | I64
           | Udefault | U8 | U16 | U32 | U64
           | Fdefault |            F32 | F64
           | BoolT
           | StructT [(String, Type)]
-          | FuncT [Type] [Type] deriving Show -- TODO: Pointers and memorychunks
+          | FuncT [Type] [Type] deriving (Show, Ord, Eq) -- TODO: Pointers and memorychunks
 
 data FuncDef = FuncDef
   { inargs :: [String]
