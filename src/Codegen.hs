@@ -15,6 +15,7 @@ import Data.Maybe
 import Data.Functor ((<$>))
 import Data.String (IsString, fromString)
 import Data.List
+import Data.Word
 import Control.Lens
 import Control.Monad.State
 import Control.Monad.Except
@@ -23,100 +24,114 @@ import LLVM.General.AST.Operand
 import LLVM.General.AST.Constant
 import LLVM.General.AST.Name
 import LLVM.General.AST.Global
+import LLVM.General.AST.Instruction
 import qualified LLVM.General.AST.Type as T
 import qualified LLVM.General.AST as AST
 import qualified Data.Map as M
 
 type GenFuncs = M.Map (String, [Type], [Type]) Operand
-data GeneratedFunctions = GeneratedFunctions
+data GenState = GenState
   { _generated :: GenFuncs
   , _requested :: GenFuncs
   , _nextName :: M.Map String Int
-  }
-
-data GenState = GenState
-  { _generatedFuncs :: GeneratedFunctions
-  , _breakTarget :: Maybe Name
-  , _continueTarget :: Maybe Name
-  , _locals :: M.Map String (Operand, Type)
   , _errors :: [ErrorMessage]
   , _source :: Source
   }
 
-emptyState :: Source -> GenState
-emptyState = GenState (GeneratedFunctions M.empty M.empty M.empty) Nothing Nothing M.empty []
+data FuncState = FuncState
+  { _genState :: GenState
+  , _breakTarget :: Maybe Name
+  , _continueTarget :: Maybe Name
+  , _locals :: M.Map String (Operand, Type)
+  , _nextFresh :: Word
+  , _finalizedBlocks :: [BasicBlock]
+  , _currentBlock :: BasicBlock
+  }
+
+emptyState :: GenFuncs -> Source -> GenState
+emptyState reqs = GenState M.empty reqs M.empty []
 
 data ErrorMessage = ErrorString String
 
-type CodeGen a = ExceptT ErrorMessage (StateT GenState Identity) a
+type CodeGen a = StateT GenState Identity a
+type FuncGen a = StateT FuncState (ExceptT ErrorMessage Identity) a
 
 generate :: Source -> GenFuncs -> Either [ErrorMessage] AST.Module
 generate source requests = case errs of
   [] -> Right $ AST.defaultModule { AST.moduleDefinitions = defs }
   _ -> Left errs
   where
-    (defs, resState) = runIdentity . runStateT generator $ emptyState source & generatedFuncs . requested .~ requests
+    (defs, resState) = runIdentity . runStateT generator $ emptyState requests source
     errs = _errors resState
-    generator :: StateT GenState Identity [AST.Definition]
+    generator :: CodeGen [AST.Definition]
     generator = do
-      mreq <- use $ generatedFuncs . requested . to M.minViewWithKey
+      mreq <- use $ requested . to M.minViewWithKey
       maybe (return []) runGenerateFunction mreq
     runGenerateFunction ((func, _), _) = do
-      resetGeneratorState
-      res <- runExceptT $ generateFunction func
-      op <- generatedFuncs . requested . at func <<.= Nothing
-      generatedFuncs . generated . at func .= op
+      res <- generateFunction func
+      op <- requested . at func <<.= Nothing
+      generated . at func .= op
       case res of
         Left err -> (errors %= (err:)) >> generator
         Right res -> (res:) <$> generator
 
-resetGeneratorState :: StateT GenState Identity ()
-resetGeneratorState = modify $ \s -> s
-  { _breakTarget = Nothing
-  , _continueTarget = Nothing
-  , _locals = M.empty
-  }
-
-generateFunction :: (String, [Type], [Type]) -> CodeGen AST.Definition
+generateFunction :: (String, [Type], [Type]) -> CodeGen (Either ErrorMessage AST.Definition)
 generateFunction (name, inTs, outTs) = do
   mFunc <- uses source $ find (\(s, _, _) -> s == name) . functionDefinitions
   case mFunc of
-    Nothing -> throwError . ErrorString $ "Function " ++ name ++ " not found"
+    Nothing -> return . Left . ErrorString $ "Function " ++ name ++ " not found"
     Just (_, FuncDef innames outnames stmnts, _) -> do
-      locals .= (M.fromList . zip (innames ++ outnames) . zip paramLocals $ inTs ++ outTs)
-      blocks <- generateFunctionBody stmnts
-      return . AST.GlobalDefinition $ functionDefaults
-        { name = fromString name
-        , parameters = (params, False)
-        , basicBlocks = blocks
-        , returnType = T.void
-        }
+      currGenState <- get
+      let initState = FuncState currGenState Nothing Nothing locals 0 [] entryBlock
+          entryBlock = BasicBlock "entry" [] . Do $ Ret Nothing []
+      return . runIdentity . runExceptT . flip evalStateT initState $ do
+        generateFunctionBody stmnts
+        use currentBlock >>= finalizeBlock
+        blocks <- use finalizedBlocks
+        return . AST.GlobalDefinition $ functionDefaults
+          { name = fromString name
+          , parameters = (params, False)
+          , basicBlocks = blocks
+          , returnType = T.void
+          }
       where
+        locals = M.fromList . zip (innames ++ outnames) . zip paramLocals $ inTs ++ outTs
         paramLocals = zipWith LocalReference (toFunctionParams inTs outTs) names
         params = map (\f -> f []) withNames
         withNames = zipWith Parameter (toFunctionParams inTs outTs) names
         names = fromString <$> (innames ++ outnames)
 
-generateFunctionBody :: [Statement] -> CodeGen [BasicBlock]
-generateFunctionBody = undefined -- TODO: figure out how to generate BasicBlocks in the best way
+generateFunctionBody :: [Statement] -> FuncGen ()
+generateFunctionBody = undefined
 
-requestFunction :: (String, [Type], [Type]) -> CodeGen Operand
+finalizeBlock :: BasicBlock -> FuncGen ()
+finalizeBlock (BasicBlock n i t) = finalizedBlocks %= (BasicBlock n (reverse i) t :)
+
+fresh :: FuncGen Name
+fresh = liftM UnName $ nextFresh <<+= 1
+
+newBlock :: FuncGen BasicBlock
+newBlock = do
+  name <- fresh
+  return $ BasicBlock name [] (Do $ Ret Nothing [])
+
+requestFunction :: (String, [Type], [Type]) -> FuncGen Operand
 requestFunction func@(name, inTs, outTs) = do
-  mo <- gets $ getFunctionOperand func . _generatedFuncs
+  mo <- gets $ getFunctionOperand func . _genState
   maybe newRequest return mo
   where
-    getNextName :: CodeGen Int
-    getNextName = fromJust <$> ( generatedFuncs . nextName . at name <%= (Just . maybe 0 succ))
-    requestWithOperand :: Operand -> CodeGen Operand
-    requestWithOperand op = generatedFuncs . requested . at func <?= op
+    getNextName :: FuncGen Int
+    getNextName = fromJust <$> (genState . nextName . at name <%= (Just . maybe 0 succ))
+    requestWithOperand :: Operand -> FuncGen Operand
+    requestWithOperand op = genState . requested . at func <?= op
     newRequest = do
       num <- getNextName
       requestWithOperand . ConstantOperand . GlobalReference (toFunctionType inTs outTs) . fromString $ name ++ show num
 
-getFunctionOperand :: (String, [Type], [Type]) -> GeneratedFunctions -> Maybe Operand
-getFunctionOperand sig (GeneratedFunctions gen req _) = case M.lookup sig gen of
+getFunctionOperand :: (String, [Type], [Type]) -> GenState -> Maybe Operand
+getFunctionOperand sig state = case M.lookup sig $ _generated state of
   Just o -> Just o
-  Nothing -> M.lookup sig req
+  Nothing -> M.lookup sig $ _requested state
 
 toFunctionType :: [Type] -> [Type] -> T.Type
 toFunctionType inTs outTs = (\ts -> T.FunctionType T.void ts False) $ toFunctionParams inTs outTs
@@ -155,41 +170,53 @@ typeMap = M.fromList
 -- require things to be linked dynamically which conflicts
 -- with my llvm bindings atm
 
-generated :: Functor f => (GenFuncs -> f GenFuncs) -> GeneratedFunctions -> f GeneratedFunctions
-generated inj (GeneratedFunctions gen req nex) = (\g -> GeneratedFunctions g req nex) <$> inj gen
+generated :: Functor f => (GenFuncs -> f GenFuncs) -> GenState -> f GenState
+generated inj state = (\gen -> state { _generated = gen }) <$> inj (_generated state)
 {-# INLINE generated #-}
 
-requested :: Functor f => (GenFuncs -> f GenFuncs) -> GeneratedFunctions -> f GeneratedFunctions
-requested inj (GeneratedFunctions gen req nex) = (\r -> GeneratedFunctions gen r nex) <$> inj req
+requested :: Functor f => (GenFuncs -> f GenFuncs) -> GenState -> f GenState
+requested inj state = (\req -> state { _requested = req }) <$> inj (_requested state)
 {-# INLINE requested #-}
 
-nextName :: Functor f => (M.Map String Int -> f (M.Map String Int)) -> GeneratedFunctions -> f GeneratedFunctions
-nextName inj (GeneratedFunctions gen req nex) = GeneratedFunctions gen req <$> inj nex
+nextName :: Functor f => (M.Map String Int -> f (M.Map String Int)) -> GenState -> f GenState
+nextName inj state = (\nn -> state { _nextName = nn }) <$> inj (_nextName state)
 {-# INLINE nextName #-}
 
-generatedFuncs :: Functor f => (GeneratedFunctions -> f GeneratedFunctions) -> GenState -> f GenState
-generatedFuncs inj g = (\gen -> g { _generatedFuncs = gen }) <$> inj (_generatedFuncs g)
-{-# INLINE generatedFuncs #-}
+source :: Functor f => (Source -> f Source) -> GenState -> f GenState
+source inj g = (\s -> g { _source = s }) <$> inj (_source g)
+{-# INLINE source #-}
 
 errors :: Functor f => ([ErrorMessage] -> f [ErrorMessage]) -> GenState -> f GenState
 errors inj g = (\errs -> g { _errors = errs }) <$> inj (_errors g)
 {-# INLINE errors #-}
 
-breakTarget :: Functor f => (Maybe Name -> f (Maybe Name)) -> GenState -> f GenState
+breakTarget :: Functor f => (Maybe Name -> f (Maybe Name)) -> FuncState -> f FuncState
 breakTarget inj g = (\bt -> g { _breakTarget = bt }) <$> inj (_breakTarget g)
 {-# INLINE breakTarget #-}
 
-continueTarget :: Functor f => (Maybe Name -> f (Maybe Name)) -> GenState -> f GenState
+continueTarget :: Functor f => (Maybe Name -> f (Maybe Name)) -> FuncState -> f FuncState
 continueTarget inj g = (\ct -> g { _continueTarget = ct }) <$> inj (_continueTarget g)
 {-# INLINE continueTarget #-}
 
-locals :: Functor f => (M.Map String (Operand, Type) -> f (M.Map String (Operand, Type))) -> GenState -> f GenState
+locals :: Functor f => (M.Map String (Operand, Type) -> f (M.Map String (Operand, Type))) -> FuncState -> f FuncState
 locals inj g = (\locs -> g { _locals = locs }) <$> inj (_locals g)
 {-# INLINE locals #-}
 
-source :: Functor f => (Source -> f Source) -> GenState -> f GenState
-source inj g = (\s -> g { _source = s }) <$> inj (_source g)
-{-# INLINE source #-}
+genState :: Functor f => (GenState -> f GenState) -> FuncState -> f FuncState
+genState inj g = (\bt -> g { _genState = bt }) <$> inj (_genState g)
+{-# INLINE genState #-}
+
+finalizedBlocks :: Functor f => ([BasicBlock] -> f [BasicBlock]) -> FuncState -> f FuncState
+finalizedBlocks inj g = (\fbs -> g { _finalizedBlocks = fbs }) <$> inj (_finalizedBlocks g)
+{-# INLINE finalizedBlocks #-}
+
+currentBlock :: Functor f => (BasicBlock -> f BasicBlock) -> FuncState -> f FuncState
+currentBlock inj g = (\cb -> g { _currentBlock = cb }) <$> inj (_currentBlock g)
+{-# INLINE currentBlock #-}
+
+nextFresh :: Functor f => (Word -> f Word) -> FuncState -> f FuncState
+nextFresh inj g = (\nf -> g { _nextFresh = nf }) <$> inj (_nextFresh g)
+{-# INLINE nextFresh #-}
 
 instance IsString Name where
   fromString = Name
