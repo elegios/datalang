@@ -26,10 +26,11 @@ import LLVM.General.AST.Name
 import LLVM.General.AST.Global
 import LLVM.General.AST.Instruction
 import qualified LLVM.General.AST.Type as T
+import qualified LLVM.General.AST.CallingConvention as CC
 import qualified LLVM.General.AST as AST
 import qualified Data.Map as M
 
-type GenFuncs = M.Map (String, [Type], [Type]) Operand
+type GenFuncs = M.Map (String, [Type], [Type]) CallableOperand
 data GenState = GenState
   { _generated :: GenFuncs
   , _requested :: GenFuncs
@@ -91,7 +92,7 @@ generateFunction (name, inTs, outTs) = do
         return . AST.GlobalDefinition $ functionDefaults
           { name = fromString name
           , parameters = (params, False)
-          , basicBlocks = blocks
+          , basicBlocks = reverse blocks
           , returnType = T.void
           }
       where
@@ -102,33 +103,84 @@ generateFunction (name, inTs, outTs) = do
         names = fromString <$> (innames ++ outnames)
 
 generateFunctionBody :: [Statement] -> FuncGen ()
-generateFunctionBody = undefined
+generateFunctionBody [] = return ()
+generateFunctionBody (VarInit name t _ : stmnts) = do
+  op <- instr (Alloca llvmType Nothing 0 [], llvmType)
+  locals . at name ?= (op, t)
+  generateFunctionBody stmnts
+  where
+    llvmType = toLLVMType t
+generateFunctionBody (Terminator t sr : stmnts)
+  | not $ null stmnts = throwError . ErrorString $ "There are statements after the terminator at " ++ show sr
+  | otherwise = do
+    term <- case t of
+      Return -> return $ Ret Nothing []
+      _ -> do
+        target <- use (boolean breakTarget continueTarget $ t == Break)
+        case target of
+          Nothing -> throwError . ErrorString $ "Cannot break or continue at " ++ show sr ++ ", no loop."
+          Just name -> return $ Br name []
+    currentBlock . blockTerminator .= Do term
+generateFunctionBody (Scope inner _ : outer) = do
+  prevLocals <- use locals
+  generateFunctionBody inner
+  locals .= prevLocals
+  generateFunctionBody outer
+generateFunctionBody (ShallowCopy assignee expression sr : stmnts) = do
+  assOp <- generateAssignableExpression assignee
+  expOp <- generateExpression expression
+  uinstr $ Store False assOp expOp Nothing 0 []
+  generateFunctionBody stmnts
+generateFunctionBody (FuncCall name inargs outargs sr : stmnts) = do
+  funcOp <- requestFunction (name, snd <$> inargs, snd <$> outargs)
+  inOps <- sequence $ generateAssignableExpression <$> (fst <$> inargs) -- TODO: generate scalars when inargs are scalars instead
+  outOps <- sequence $ generateAssignableExpression <$> (fst <$> outargs)
+  uinstr $ Call False CC.C [] funcOp (zip (inOps ++ outOps) $ repeat []) [] []
+  generateFunctionBody stmnts
+
+generateAssignableExpression :: Expression -> FuncGen Operand
+generateAssignableExpression = undefined
+
+generateExpression :: Expression -> FuncGen Operand
+generateExpression = undefined
 
 finalizeBlock :: BasicBlock -> FuncGen ()
-finalizeBlock (BasicBlock n i t) = finalizedBlocks %= (BasicBlock n (reverse i) t :)
+finalizeBlock b = finalizedBlocks %= ((b & blockInstrs %~ reverse) :)
 
 fresh :: FuncGen Name
 fresh = liftM UnName $ nextFresh <<+= 1
+
+freshName :: String -> FuncGen Name
+freshName name = liftM (Name . (name ++) . show) $ nextFresh <<+= 1
+
+instr :: (Instruction, T.Type) -> FuncGen Operand
+instr (instruction, t) = do
+  name <- fresh
+  currentBlock . blockInstrs %= (name := instruction :)
+  return $ LocalReference t name
+
+uinstr :: Instruction -> FuncGen ()
+uinstr instruction = currentBlock . blockInstrs %= (Do instruction :)
 
 newBlock :: FuncGen BasicBlock
 newBlock = do
   name <- fresh
   return $ BasicBlock name [] (Do $ Ret Nothing [])
 
-requestFunction :: (String, [Type], [Type]) -> FuncGen Operand
+requestFunction :: (String, [Type], [Type]) -> FuncGen CallableOperand
 requestFunction func@(name, inTs, outTs) = do
   mo <- gets $ getFunctionOperand func . _genState
   maybe newRequest return mo
   where
     getNextName :: FuncGen Int
     getNextName = fromJust <$> (genState . nextName . at name <%= (Just . maybe 0 succ))
-    requestWithOperand :: Operand -> FuncGen Operand
+    requestWithOperand :: CallableOperand -> FuncGen CallableOperand
     requestWithOperand op = genState . requested . at func <?= op
     newRequest = do
       num <- getNextName
-      requestWithOperand . ConstantOperand . GlobalReference (toFunctionType inTs outTs) . fromString $ name ++ show num
+      requestWithOperand . Right . ConstantOperand . GlobalReference (toFunctionType inTs outTs) . fromString $ name ++ show num
 
-getFunctionOperand :: (String, [Type], [Type]) -> GenState -> Maybe Operand
+getFunctionOperand :: (String, [Type], [Type]) -> GenState -> Maybe CallableOperand
 getFunctionOperand sig state = case M.lookup sig $ _generated state of
   Just o -> Just o
   Nothing -> M.lookup sig $ _requested state
@@ -146,7 +198,6 @@ toLLVMType t = fromMaybe composite $ M.lookup t typeMap
     composite = case t of
       StructT parts -> T.StructureType False $ toLLVMType . snd <$> parts
       FuncT ins outs -> toFunctionType ins outs
-
 
 typeMap :: M.Map Type T.Type
 typeMap = M.fromList
@@ -218,5 +269,17 @@ nextFresh :: Functor f => (Word -> f Word) -> FuncState -> f FuncState
 nextFresh inj g = (\nf -> g { _nextFresh = nf }) <$> inj (_nextFresh g)
 {-# INLINE nextFresh #-}
 
+blockInstrs :: Functor f => ([Named Instruction] -> f [Named Instruction]) -> BasicBlock -> f BasicBlock
+blockInstrs inj (BasicBlock n i t) = (\is -> BasicBlock n is t) <$> inj i
+{-# INLINE blockInstrs #-}
+
+blockTerminator :: Functor f => (Named Terminator -> f (Named Terminator)) -> BasicBlock -> f BasicBlock
+blockTerminator inj (BasicBlock n i t) = BasicBlock n i <$> inj t
+{-# INLINE blockTerminator #-}
+
 instance IsString Name where
   fromString = Name
+
+boolean :: a -> a -> Bool -> a
+boolean a _ True = a
+boolean _ a False = a

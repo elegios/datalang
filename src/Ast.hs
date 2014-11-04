@@ -24,11 +24,15 @@ data FuncDef = FuncDef
   , stmnts :: [Statement]
   } deriving Show
 
-data Statement = FuncCall String [Expression] [Expression] SourceRange
+data Statement = FuncCall String [(Expression, Type)] [(Expression, Type)] SourceRange
                | ShallowCopy Expression Expression SourceRange
-               | If Expression [Statement] (Maybe [Statement]) SourceRange
-               | While Expression [Statement] SourceRange
+               | If Expression Statement (Maybe Statement) SourceRange
+               | While Expression Statement SourceRange
+               | Scope [Statement] SourceRange
+               | Terminator TerminatorType SourceRange
                | VarInit String Type SourceRange deriving Show
+
+data TerminatorType = Return | Break | Continue deriving (Show, Eq)
 
 data Expression = Bin BinOp Expression Expression SourceRange
                 | Un UnOp Expression SourceRange
