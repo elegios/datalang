@@ -17,6 +17,7 @@ data Type = Idefault | I8 | I16 | I32 | I64
           | BoolT
           | StructT [(String, Type)]
           | FuncT [Type] [Type] deriving (Show, Ord, Eq) -- TODO: Pointers and memorychunks
+  -- TODO: custom instance for Eq
 
 data FuncDef = FuncDef
   { inargs :: [String]
@@ -40,14 +41,14 @@ data Expression = Bin BinOp Expression Expression SourceRange
                 | Variable String SourceRange
                 | ExprLit Literal SourceRange deriving Show
 
-data BinOp = Plus | Minus | Times | Divide | Modulo
+data BinOp = Plus | Minus | Times | Divide | Remainder
            | Lesser | Greater | LE | GE | Equal | NotEqual
            | And | Or
-           | BinAnd | BinOr | LShift | RShift | RShift2 | Xor deriving Show
+           | BinAnd | BinOr | LShift | LogRShift | AriRShift | Xor deriving Show
 data UnOp = Not | BinNegate | AriNegate deriving Show
 
-data Literal = ILit Integer
-             | FLit Double
+data Literal = ILit Integer Type
+             | FLit Double Type
              | BLit Bool deriving Show -- TODO: struct literals
 
 {-

@@ -1,4 +1,5 @@
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE TupleSections #-}
 
 module CodeGen where
 
@@ -21,13 +22,16 @@ import Control.Monad.State
 import Control.Monad.Except
 import Control.Monad.Identity
 import LLVM.General.AST.Operand
-import LLVM.General.AST.Constant
 import LLVM.General.AST.Name
 import LLVM.General.AST.Global
-import LLVM.General.AST.Instruction
+import LLVM.General.AST.IntegerPredicate as IP
+import LLVM.General.AST.Instruction as I
+import qualified LLVM.General.AST.FloatingPointPredicate as FP
 import qualified LLVM.General.AST.Type as T
 import qualified LLVM.General.AST.CallingConvention as CC
+import qualified LLVM.General.AST.Constant as C
 import qualified LLVM.General.AST as AST
+import qualified LLVM.General.AST.Float as F
 import qualified Data.Map as M
 
 type GenFuncs = M.Map (String, [Type], [Type]) CallableOperand
@@ -104,12 +108,14 @@ generateFunction (name, inTs, outTs) = do
 
 generateFunctionBody :: [Statement] -> FuncGen ()
 generateFunctionBody [] = return ()
+
 generateFunctionBody (VarInit name t _ : stmnts) = do
   op <- instr (Alloca llvmType Nothing 0 [], llvmType)
   locals . at name ?= (op, t)
   generateFunctionBody stmnts
   where
     llvmType = toLLVMType t
+
 generateFunctionBody (Terminator t sr : stmnts)
   | not $ null stmnts = throwError . ErrorString $ "There are statements after the terminator at " ++ show sr
   | otherwise = do
@@ -121,31 +127,188 @@ generateFunctionBody (Terminator t sr : stmnts)
           Nothing -> throwError . ErrorString $ "Cannot break or continue at " ++ show sr ++ ", no loop."
           Just name -> return $ Br name []
     currentBlock . blockTerminator .= Do term
+
 generateFunctionBody (Scope inner _ : outer) = do
   prevLocals <- use locals
   generateFunctionBody inner
   locals .= prevLocals
   generateFunctionBody outer
+
 generateFunctionBody (ShallowCopy assignee expression sr : stmnts) = do
-  assOp <- generateAssignableExpression assignee
-  expOp <- generateExpression expression
+  (assOp, _) <- generateAssignableExpression assignee
+  (expOp, _) <- generateExpression expression
   uinstr $ Store False assOp expOp Nothing 0 []
   generateFunctionBody stmnts
+
 generateFunctionBody (FuncCall name inargs outargs sr : stmnts) = do
   funcOp <- requestFunction (name, snd <$> inargs, snd <$> outargs)
   inOps <- sequence $ generateAssignableExpression <$> (fst <$> inargs) -- TODO: generate scalars when inargs are scalars instead
   outOps <- sequence $ generateAssignableExpression <$> (fst <$> outargs)
-  uinstr $ Call False CC.C [] funcOp (zip (inOps ++ outOps) $ repeat []) [] []
+  uinstr $ Call False CC.C [] funcOp (zip (map fst $ inOps ++ outOps) $ repeat []) [] []
   generateFunctionBody stmnts
 
-generateAssignableExpression :: Expression -> FuncGen Operand
-generateAssignableExpression = undefined
+generateFunctionBody (While condition stmnt sr : stmnts) = do
+  condBlock <- newBlock
+  bodyBlock <- newBlock
+  nextBlock <- newBlock
+  let nextName = nextBlock ^. blockName
+      condName = condBlock ^. blockName
+      bodyName = bodyBlock ^. blockName
 
-generateExpression :: Expression -> FuncGen Operand
-generateExpression = undefined
+  prevBreakTarget <- breakTarget <<.= Just nextName
+  prevContinueTarget <- continueTarget <<.= Just condName
+  prevTerminator <- currentBlock . blockTerminator <<.= (Do $ Br condName [])
+
+  finalizeAndReplaceWith condBlock
+  (condOp, _) <- generateExpression condition
+  currentBlock . blockTerminator .= (Do $ CondBr condOp bodyName nextName [])
+
+  finalizeAndReplaceWith $ bodyBlock & blockTerminator .~ (Do $ Br condName [])
+  generateFunctionBody [stmnt]
+
+  finalizeAndReplaceWith $ nextBlock & blockTerminator .~ prevTerminator
+  breakTarget .= prevBreakTarget
+  continueTarget .= prevContinueTarget
+  generateFunctionBody stmnts
+
+generateFunctionBody (If condition thenStmnt mElseStmnt sr : stmnts) = do
+  thenBlock <- newBlock
+  elseBlock <- newBlock
+  nextBlock <- newBlock
+  let nextName = nextBlock ^. blockName
+      thenName = thenBlock ^. blockName
+      elseName = elseBlock ^. blockName
+
+  (condOp, _) <- generateExpression condition
+  prevTerminator <- currentBlock . blockTerminator <<.= (Do $ CondBr condOp thenName elseName [])
+
+  finalizeAndReplaceWith $ thenBlock & blockTerminator .~ (Do $ Br nextName [])
+  generateFunctionBody [thenStmnt]
+
+  finalizeAndReplaceWith $ elseBlock & blockTerminator .~ (Do $ Br nextName [])
+  generateFunctionBody $ maybeToList mElseStmnt
+
+  finalizeAndReplaceWith $ nextBlock & blockTerminator .~ prevTerminator
+  generateFunctionBody stmnts
+
+generateAssignableExpression :: Expression -> FuncGen (Operand, Type)
+generateAssignableExpression (Variable name sr) = do
+  mOp <- use $ locals . at name
+  case mOp of
+    Nothing -> throwError . ErrorString $ "Unknown variable " ++ name ++ " at " ++ show sr
+    Just op -> return op
+generateAssignableExpression (MemberAccess expression name sr) = do
+  (bigOp, bigT) <- generateAssignableExpression expression
+  (index, t) <- findNameIndexInStruct name bigT sr
+  op <- instr (I.GetElementPtr False bigOp [constInt 0, constInt index] [], toLLVMType t)
+  return (op, t)
+  where
+    constInt = ConstantOperand . C.Int 32
+
+generateExpression :: Expression -> FuncGen (Operand, Type)
+generateExpression (ExprLit lit sr) = return $ case lit of
+  ILit val t -> (ConstantOperand $ C.Int size val, t)
+    where size = fromJust $ M.lookup t typeSizeMap
+  FLit val t -> (ConstantOperand . C.Float $ F.Double val, t)
+  BLit val -> (ConstantOperand . C.Int 1 $ boolean 1 0 val, BoolT)
+
+generateExpression (Variable name sr) = do
+  mVal <- use $ locals . at name
+  case mVal of
+    Nothing -> throwError . ErrorString $ "Unknown variable " ++ name ++ " at " ++ show sr
+    Just (op, t) -> liftM (, t) . instr $ (Load False op Nothing 0 [], toLLVMType t)
+
+generateExpression (MemberAccess expression name sr) = do
+  (bigOp, bigT) <- generateExpression expression
+  (index, t) <- findNameIndexInStruct name bigT sr
+  ptrOp <- instr (GetElementPtr False bigOp [constInt 0, constInt index] [], toLLVMType t)
+  liftM (, t) . instr $ (Load False ptrOp Nothing 0 [], toLLVMType t)
+  where
+    constInt = ConstantOperand . C.Int 32
+
+{-generateExpression (Un operator expression sr) = do-} -- TODO: Unary operators
+  {-(expOp, t) <- generateExpression expression-}
+  {-case operator of-}
+    {-AriNegate -> -}
+
+generateExpression (Bin operator exp1 exp2 sr) = do
+  res1@(_, t1) <- generateExpression exp1
+  res2@(_, t2) <- generateExpression exp2
+  when (t1 /= t2) . throwError . ErrorString $ "The expressions around " ++ show operator ++ " at " ++ show sr ++ " have different types (" ++ show t1 ++ " != " ++ show t2 ++ ")"
+  llvmOperator <- if isNum t1
+    then case operator of
+      Plus -> return $ if isFloat t1 then FAdd NoFastMathFlags else Add False False
+      Minus -> return $ if isFloat t1 then FSub NoFastMathFlags else Sub False False
+      Times -> return $ if isFloat t1 then FMul NoFastMathFlags else Mul False False
+      Divide -> return $ if isFloat t1
+        then FDiv NoFastMathFlags else if isUnsigned t1
+          then UDiv False
+          else SDiv False
+      Remainder -> return $ if isFloat t1
+        then FRem NoFastMathFlags else if isUnsigned t1
+          then URem
+          else SRem
+      Lesser -> return $ if isFloat t1
+        then FCmp FP.OLT
+        else ICmp $ if isUnsigned t1 then ULT else SLT
+      Greater -> return $ if isFloat t1
+        then FCmp FP.OGT
+        else ICmp $ if isUnsigned t1 then UGT else SGT
+      LE -> return $ if isFloat t1
+        then FCmp FP.OLE
+        else ICmp $ if isUnsigned t1 then ULE else SLE
+      GE -> return $ if isFloat t1
+        then FCmp FP.OGE
+        else ICmp $ if isUnsigned t1 then UGE else SGE
+      Equal -> return $ if isFloat t1
+        then FCmp FP.OEQ
+        else ICmp IP.EQ
+      NotEqual -> return $ if isFloat t1
+        then FCmp FP.ONE
+        else ICmp NE
+      BinAnd -> if isFloat t1
+        then throwError . ErrorString $ "BinAnd is not applicable to floats: " ++ show sr
+        else return AST.And
+      BinOr -> if isFloat t1
+        then throwError . ErrorString $ "BinOr is not applicable to floats: " ++ show sr
+        else return AST.Or
+      Ast.Xor -> if isFloat t1
+        then throwError . ErrorString $ "Xor is not applicable to floats: " ++ show sr
+        else return AST.Xor
+      LShift -> if isFloat t1
+        then throwError . ErrorString $ "LShift is not applicable to floats: " ++ show sr
+        else return $ Shl False False
+      LogRShift -> if isFloat t1
+        then throwError . ErrorString $ "LogRShift is not applicable to floats: " ++ show sr
+        else return $ LShr False
+      AriRShift -> if isFloat t1
+        then throwError . ErrorString $ "LogRShift is not applicable to floats: " ++ show sr
+        else return $ AShr False
+      _ -> throwError . ErrorString $ show operator ++ " not supported for expressions of type " ++ show t1 ++ " at " ++ show sr
+
+    else case t1 of -- Non-numerical case
+      BoolT -> return . ICmp $ case operator of -- TODO: shortcutting &&/||
+        Equal -> IP.EQ
+        NotEqual -> IP.NE
+      -- TODO: struct binary operators
+  binOp llvmOperator res1 res2
+
+binOp :: (Operand -> Operand -> InstructionMetadata -> Instruction) -> (Operand, Type) -> (Operand, Type) -> FuncGen (Operand, Type)
+binOp operator (op1, t1) (op2, t2)= do
+  res <- instr (operator op1 op2 [], toLLVMType t1)
+  return (res, t1)
+
+findNameIndexInStruct :: String -> Type -> SourceRange -> FuncGen (Integer, Type)
+findNameIndexInStruct name (StructT fields) sr = case find (\(_, (n, _)) -> n == name) $ zip [0..] fields of
+  Just (i, (_, t)) -> return (i, t)
+  Nothing -> throwError . ErrorString $ "Unknown member field " ++ name ++ " in struct at " ++ show sr
+findNameIndexInStruct _ _ sr = throwError . ErrorString $ "Attempt to access member field of non-struct type at " ++ show sr
 
 finalizeBlock :: BasicBlock -> FuncGen ()
 finalizeBlock b = finalizedBlocks %= ((b & blockInstrs %~ reverse) :)
+
+finalizeAndReplaceWith :: BasicBlock -> FuncGen ()
+finalizeAndReplaceWith b = (currentBlock <<.= b) >>= finalizeBlock
 
 fresh :: FuncGen Name
 fresh = liftM UnName $ nextFresh <<+= 1
@@ -167,6 +330,28 @@ newBlock = do
   name <- fresh
   return $ BasicBlock name [] (Do $ Ret Nothing [])
 
+isFloat :: Type -> Bool
+isFloat Fdefault = True
+isFloat F32 = True
+isFloat F64 = True
+isFloat _ = False
+
+isUnsigned :: Type -> Bool
+isUnsigned Udefault = True
+isUnsigned U8 = True
+isUnsigned U16 = True
+isUnsigned U32 = True
+isUnsigned U64 = True
+isUnsigned _ = False
+
+isNum :: Type -> Bool
+isNum Idefault = True
+isNum I8 = True
+isNum I16 = True
+isNum I32 = True
+isNum I64 = True
+isNum n = isFloat n || isUnsigned n
+
 requestFunction :: (String, [Type], [Type]) -> FuncGen CallableOperand
 requestFunction func@(name, inTs, outTs) = do
   mo <- gets $ getFunctionOperand func . _genState
@@ -178,7 +363,7 @@ requestFunction func@(name, inTs, outTs) = do
     requestWithOperand op = genState . requested . at func <?= op
     newRequest = do
       num <- getNextName
-      requestWithOperand . Right . ConstantOperand . GlobalReference (toFunctionType inTs outTs) . fromString $ name ++ show num
+      requestWithOperand . Right . ConstantOperand . C.GlobalReference (toFunctionType inTs outTs) . fromString $ name ++ show num
 
 getFunctionOperand :: (String, [Type], [Type]) -> GenState -> Maybe CallableOperand
 getFunctionOperand sig state = case M.lookup sig $ _generated state of
@@ -215,6 +400,22 @@ typeMap = M.fromList
   , (F64, T.double)
 
   , (BoolT, T.i1)
+  ]
+
+typeSizeMap :: M.Map Type Word32
+typeSizeMap = M.fromList
+  [ (I8, 8)
+  , (I16, 16)
+  , (I32, 32)
+  , (I64, 64)
+
+  , (U8, 8)
+  , (U16, 16)
+  , (U32, 32)
+  , (U64, 64)
+
+  , (F32, 32)
+  , (F64, 64)
   ]
 
 -- These lenses could be generated if TemplateHaskell didn't
@@ -276,6 +477,10 @@ blockInstrs inj (BasicBlock n i t) = (\is -> BasicBlock n is t) <$> inj i
 blockTerminator :: Functor f => (Named Terminator -> f (Named Terminator)) -> BasicBlock -> f BasicBlock
 blockTerminator inj (BasicBlock n i t) = BasicBlock n i <$> inj t
 {-# INLINE blockTerminator #-}
+
+blockName :: Functor f => (Name-> f Name) -> BasicBlock -> f BasicBlock
+blockName inj (BasicBlock n i t) = (\n' -> BasicBlock n' i t) <$> inj n
+{-# INLINE blockName #-}
 
 instance IsString Name where
   fromString = Name
