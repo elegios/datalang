@@ -56,7 +56,7 @@ data FuncState = FuncState
 emptyState :: GenFuncs -> Source -> GenState
 emptyState reqs = GenState M.empty reqs M.empty []
 
-data ErrorMessage = ErrorString String
+data ErrorMessage = ErrorString String deriving Show
 
 type CodeGen a = StateT GenState Identity a
 type FuncGen a = StateT FuncState (ExceptT ErrorMessage Identity) a
