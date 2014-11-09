@@ -21,16 +21,19 @@ import Control.Monad.Except (runExceptT, ExceptT(..))
 
 main = case generate testAst (Map.fromList [(("main", [], []), Right . O.ConstantOperand . C.GlobalReference (toFunctionType [] []) $ "main")]) of
   Left errs -> print errs
-  Right mod -> printModule mod
+  Right mod -> writeObjectFile mod >> printModule mod
 
 testAst :: Source
 testAst = Source
   { functionDefinitions =
     [ ("main", FuncDef [] []
-      [ VarInit "a" I8 sr
-      , ShallowCopy (Variable "a" sr) (Bin Plus (Variable "a" sr) (ExprLit (ILit 4 I8) sr) sr) sr
-      , While (Bin Lesser (Variable "a" sr) (ExprLit (ILit 10 I8) sr) sr) (Scope
-        [ ShallowCopy (Variable "a" sr) (Bin Times (Variable "a" sr) (ExprLit (ILit 2 I8) sr) sr) sr
+      [ VarInit "a" U64 sr
+      , ShallowCopy (Variable "a" sr) (Bin Plus (Variable "a" sr) (ExprLit (ILit 4 U64) sr) sr) sr
+      , While (Bin Lesser (Variable "a" sr) (ExprLit (ILit 10 U64) sr) sr) (Scope
+        [ ShallowCopy (Variable "a" sr) (Bin Times (Variable "a" sr) (ExprLit (ILit 2 U64) sr) sr) sr
+        ] sr) sr
+      , While (Bin Lesser (Variable "a" sr) (ExprLit (ILit 1000000000 U64) sr) sr) (Scope
+        [ ShallowCopy (Variable "a" sr) (Bin Plus (Variable "a" sr) (ExprLit (ILit 1 U64) sr) sr) sr
         ] sr) sr
       ], sr)
     ]
