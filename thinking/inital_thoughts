@@ -195,3 +195,71 @@ get what we want:
 
 This of course assumes that the type system can select the correct variation of
 read based on its 'return type'.
+
+I think that a good first attempt at function overloading should be to have the
+compiler emit an error when there are multiple overloads that fit a certain
+use. This means it should generally be easy to figure out which one is used,
+and also that the compiler never chooses the wrong one. It does however remove
+the option of making a general version and then providing something more
+specialized. I'm not entirely sure if a more specialized version is every
+wanted, but if it is it might be a reasonable idea to provide a "specialized"
+or "generalized" keyword, where the first means, "pick this version if multiple
+exist" and the second means "don't pick this one in case of multiple fitting
+versions". That particular thing will wait though.
+
+Being able to generate a function in expression form, where the llvm ir
+actually has it as a function with a return value, is probably a rather good
+thing. It means that main can be generated without any kind of edge case. It
+does however mean some changes need to be made in how things are generated,
+which admittedly would need to be done anyway.
+
+Function selection can probably only be done when all types are finalized,
+which is only when the function has been requested. This means that the code
+generator will have to do some more work here, to pick a fitting function
+definition. In addition, types will have to be generated, assuming the current
+version of type parameterization for structs will be used.
+
+Things to generate:
+- normal functions
+- expression functions
+- parameterized types
+
+Normal types can just be straight up generated before all of that, and also
+have a very simple way of choosing the name. Expression functions make some
+instances of the function selection problem tricky. Consider:
+
+(read(mat, row, col), true) write (list)
+
+Functions involved:
+- read :: (mat, row, col) -> (a)
+- write :: (a, Bool) -> (list)
+
+What function definitions are applicable depend on the definition chosen for
+the other function. This also becomes an even bigger problem when there are
+more expression functions involved.
+
+Here the compiler would need to find all possible combinations and check if
+they work. In most cases this shouldn't be too bad, but there are always worst
+cases.
+
+The finished compiler will probably have three or four stages:
+
+- parsing, reads code into the AST. Should generate a 'basic' semantic version,
+  not necessarily with a one to one mapping between language constructs and the
+  AST. This is to simplify the later stages. This is also where int->i32 or i64
+  should happen.
+
+- type checking. Ensures that all names are known in the scope in which they
+  are used, that all types match in expressions, propagates requirements to
+  function signatures. Note that at this stage functions can only apply
+  requirements in certain cases, if the known types are sufficient to select
+  a singular function, which will probably not be done, at least not at first.
+
+- propagate requirements through function call graph. Should be simple if it's
+  acyclic, not so simple otherwise. Probably solvable, but is probably lower
+  priority. The absence of this feature means that later function selection will
+  have a few extra false negatives, where multiple functions will appear fit for
+  selection when in reality many have requirements hidden in functions they call.
+
+- code generation and function selection. What's currently implemented. Will
+  have to be extended.
