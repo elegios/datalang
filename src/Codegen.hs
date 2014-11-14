@@ -34,7 +34,9 @@ import qualified LLVM.General.AST as AST
 import qualified LLVM.General.AST.Float as F
 import qualified Data.Map as M
 
-type GenFuncs = M.Map (String, [Type], [Type]) CallableOperand
+data FuncSig = NormalSig String [Type] [Type]
+             | ExprSig String [Type] Type deriving (Eq, Ord)
+type GenFuncs = M.Map FuncSig CallableOperand
 data GenState = GenState
   { _generated :: GenFuncs
   , _requested :: GenFuncs
@@ -47,6 +49,7 @@ data FuncState = FuncState
   { _genState :: GenState
   , _breakTarget :: Maybe Name
   , _continueTarget :: Maybe Name
+  , _retTerminator :: Terminator
   , _locals :: M.Map String (Operand, Type)
   , _nextFresh :: Word
   , _finalizedBlocks :: [BasicBlock]
@@ -80,14 +83,14 @@ generate source requests = case errs of
         Left err -> (errors %= (err:)) >> generator
         Right res -> (res:) <$> generator
 
-generateFunction :: (String, [Type], [Type]) -> CodeGen (Either ErrorMessage AST.Definition)
-generateFunction (name, inTs, outTs) = do
+generateFunction :: FuncSig -> CodeGen (Either ErrorMessage AST.Definition)
+generateFunction (NormalSig name inTs outTs) = do
   mFunc <- uses source $ find (\(s, _, _) -> s == name) . functionDefinitions
   case mFunc of
     Nothing -> return . Left . ErrorString $ "Function " ++ name ++ " not found"
     Just (_, FuncDef innames outnames stmnts, _) -> do
       currGenState <- get
-      let initState = FuncState currGenState Nothing Nothing locals 0 [] entryBlock
+      let initState = FuncState currGenState Nothing Nothing (Ret Nothing []) locals 0 [] entryBlock
           entryBlock = BasicBlock "entry" [] . Do $ Ret Nothing []
       return . runIdentity . runExceptT . flip evalStateT initState $ do
         generateFunctionBody stmnts
@@ -106,6 +109,37 @@ generateFunction (name, inTs, outTs) = do
         withNames = zipWith Parameter (toFunctionParams inTs outTs) names
         names = fromString <$> (innames ++ outnames)
 
+generateFunction (ExprSig name inTs outT) = do
+  currGenState <- get
+  let initState = FuncState currGenState Nothing Nothing (Br "returnBlock" []) M.empty 0 [] entryBlock
+      entryBlock = BasicBlock "entry" [] . Do $ Br "returnBlock" []
+      retBlock = BasicBlock "returnBlock" [] . Do $ Ret Nothing []
+  return . runIdentity . runExceptT . flip evalStateT initState $ do
+    mFunc <- uses (genState . source . to functionDefinitions) $ find (\(s, _, _) -> s == name)
+    (_, FuncDef innames [outname] stmnts, _) <- justErr (ErrorString $ "Function " ++ name ++ " not found") mFunc -- TODO: ugly death on incorrect number of outarguments
+
+    let initLocals = M.fromList . zip innames . zip paramLocals $ inTs
+        paramLocals = zipWith LocalReference (toFunctionParams inTs []) names
+        params = map (\f -> f []) withNames
+        withNames = zipWith Parameter (toFunctionParams inTs []) names
+        names = fromString <$> innames
+
+    locals .= initLocals
+    generateFunctionBody $ VarInit outname outT undefined : stmnts
+
+    finalizeAndReplaceWith retBlock
+    (retOp, _) <- generateExpression (Variable outname undefined)
+    currentBlock . blockTerminator .= (Do $ Ret (Just retOp) [])
+
+    use currentBlock >>= finalizeBlock
+    blocks <- use finalizedBlocks
+    return . AST.GlobalDefinition $ functionDefaults
+      { name = fromString name
+      , parameters = (params, False)
+      , basicBlocks = reverse blocks
+      , returnType = toLLVMType outT
+      }
+    
 generateFunctionBody :: [Statement] -> FuncGen ()
 generateFunctionBody [] = return ()
 
@@ -120,7 +154,7 @@ generateFunctionBody (Terminator t sr : stmnts)
   | not $ null stmnts = throwError . ErrorString $ "There are statements after the terminator at " ++ show sr
   | otherwise = do
     term <- case t of
-      Return -> return $ Ret Nothing []
+      Return -> use retTerminator
       _ -> do
         target <- use (boolean breakTarget continueTarget $ t == Break)
         case target of
@@ -141,9 +175,9 @@ generateFunctionBody (ShallowCopy assignee expression sr : stmnts) = do
   generateFunctionBody stmnts
 
 generateFunctionBody (FuncCall name inargs outargs sr : stmnts) = do
-  funcOp <- requestFunction (name, snd <$> inargs, snd <$> outargs)
-  inOps <- sequence $ generateAssignableExpression <$> (fst <$> inargs) -- TODO: generate scalars when inargs are scalars instead
-  outOps <- sequence $ generateAssignableExpression <$> (fst <$> outargs)
+  inOps <- sequence $ generateAssignableExpression <$> inargs -- TODO: generate scalars when inargs are scalars instead
+  outOps <- sequence $ generateAssignableExpression <$> outargs
+  funcOp <- requestFunction $ NormalSig name (snd <$> inOps) (snd <$> outOps)
   uinstr $ Call False CC.C [] funcOp (zip (map fst $ inOps ++ outOps) $ repeat []) [] []
   generateFunctionBody stmnts
 
@@ -331,13 +365,11 @@ newBlock = do
   return $ BasicBlock name [] (Do $ Ret Nothing [])
 
 isFloat :: Type -> Bool
-isFloat Fdefault = True
 isFloat F32 = True
 isFloat F64 = True
 isFloat _ = False
 
 isUnsigned :: Type -> Bool
-isUnsigned Udefault = True
 isUnsigned U8 = True
 isUnsigned U16 = True
 isUnsigned U32 = True
@@ -345,15 +377,14 @@ isUnsigned U64 = True
 isUnsigned _ = False
 
 isNum :: Type -> Bool
-isNum Idefault = True
 isNum I8 = True
 isNum I16 = True
 isNum I32 = True
 isNum I64 = True
 isNum n = isFloat n || isUnsigned n
 
-requestFunction :: (String, [Type], [Type]) -> FuncGen CallableOperand
-requestFunction func@(name, inTs, outTs) = do
+requestFunction :: FuncSig -> FuncGen CallableOperand
+requestFunction func = do
   mo <- gets $ getFunctionOperand func . _genState
   maybe newRequest return mo
   where
@@ -364,8 +395,11 @@ requestFunction func@(name, inTs, outTs) = do
     newRequest = do
       num <- getNextName
       requestWithOperand . Right . ConstantOperand . C.GlobalReference (toFunctionType inTs outTs) . fromString $ name ++ show num
+    (name, inTs, outTs) = case func of
+      NormalSig n its ots -> (n, its, ots)
+      ExprSig n its ot -> (n, its, [ot])
 
-getFunctionOperand :: (String, [Type], [Type]) -> GenState -> Maybe CallableOperand
+getFunctionOperand :: FuncSig -> GenState -> Maybe CallableOperand
 getFunctionOperand sig state = case M.lookup sig $ _generated state of
   Just o -> Just o
   Nothing -> M.lookup sig $ _requested state
@@ -454,6 +488,10 @@ locals :: Functor f => (M.Map String (Operand, Type) -> f (M.Map String (Operand
 locals inj g = (\locs -> g { _locals = locs }) <$> inj (_locals g)
 {-# INLINE locals #-}
 
+retTerminator :: Functor f => (Terminator -> f Terminator) -> FuncState -> f FuncState
+retTerminator inj g = (\locs -> g { _retTerminator = locs }) <$> inj (_retTerminator g)
+{-# INLINE retTerminator #-}
+
 genState :: Functor f => (GenState -> f GenState) -> FuncState -> f FuncState
 genState inj g = (\bt -> g { _genState = bt }) <$> inj (_genState g)
 {-# INLINE genState #-}
@@ -488,3 +526,7 @@ instance IsString Name where
 boolean :: a -> a -> Bool -> a
 boolean a _ True = a
 boolean _ a False = a
+
+justErr :: MonadError e m => e -> Maybe a -> m a
+justErr _ (Just a) = return a
+justErr err Nothing = throwError err

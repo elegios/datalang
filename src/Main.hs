@@ -19,9 +19,12 @@ import LLVM.General.Context
 import LLVM.General.Target
 import Control.Monad.Except (runExceptT, ExceptT(..))
 
-main = case generate testAst (Map.fromList [(("main", [], []), Right . O.ConstantOperand . C.GlobalReference (toFunctionType [] []) $ "main")]) of
+main = case generate ast (Map.fromList [(requestedSig, Right . O.ConstantOperand . C.GlobalReference (toFunctionType [] []) $ "main")]) of
   Left errs -> print errs
   Right mod -> writeObjectFile mod >> printModule mod
+  where
+    {-(requestedSig, ast) = (NormalSig "main" [] [], testAst)-}
+    (requestedSig, ast) = (ExprSig "main" [] I32, exprAst)
 
 testAst :: Source
 testAst = Source
@@ -41,8 +44,23 @@ testAst = Source
   , constantDefinitions = []
   }
 
-sr = SourceRange SourceLoc SourceLoc
+exprAst :: Source
+exprAst = Source
+  { functionDefinitions =
+    [ ("main", FuncDef [] ["a"]
+      [ ShallowCopy (Variable "a" sr) (ExprLit (ILit 4 I32) sr) sr
+      , If (ExprLit (BLit True) sr) (Scope
+        [ ShallowCopy (Variable "a" sr) (ExprLit (ILit 42 I32) sr) sr
+        , Terminator Return sr
+        ] sr) Nothing sr
+      ], sr)
+    ]
+  , typeDefinitions = []
+  , constantDefinitions = []
+  }
 
+
+sr = SourceRange SourceLoc SourceLoc
 writeObjectFile :: AST.Module -> IO (Either String ())
 writeObjectFile mod = withContext $ \context ->
     runExceptT $ M.withModuleFromAST context mod $ \m ->

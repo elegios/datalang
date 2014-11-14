@@ -11,9 +11,9 @@ data Source = Source
 
 type Top a = (String, a, SourceRange)
 
-data Type = Idefault | I8 | I16 | I32 | I64
-          | Udefault | U8 | U16 | U32 | U64
-          | Fdefault |            F32 | F64
+data Type = I8 | I16 | I32 | I64
+          | U8 | U16 | U32 | U64
+          |            F32 | F64
           | BoolT
           | StructT [(String, Type)]
           | FuncT [Type] [Type] deriving (Show, Ord, Eq) -- TODO: Pointers and memorychunks
@@ -25,7 +25,7 @@ data FuncDef = FuncDef
   , stmnts :: [Statement]
   } deriving Show
 
-data Statement = FuncCall String [(Expression, Type)] [(Expression, Type)] SourceRange
+data Statement = FuncCall String [Expression] [Expression] SourceRange
                | ShallowCopy Expression Expression SourceRange
                | If Expression Statement (Maybe Statement) SourceRange
                | While Expression Statement SourceRange
@@ -39,6 +39,7 @@ data Expression = Bin BinOp Expression Expression SourceRange
                 | Un UnOp Expression SourceRange
                 | MemberAccess Expression String SourceRange
                 | Variable String SourceRange
+                | ExprFunc String [Expression]
                 | ExprLit Literal SourceRange deriving Show
 
 data BinOp = Plus | Minus | Times | Divide | Remainder
