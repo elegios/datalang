@@ -15,8 +15,7 @@ data Type = I8 | I16 | I32 | I64
           | U8 | U16 | U32 | U64
           |            F32 | F64
           | BoolT
-          | StructT [(String, Type)]
-          | FuncT [Type] [Type] deriving (Show, Ord, Eq) -- TODO: Pointers and memorychunks
+          | StructT [(String, Type)] deriving (Show, Ord, Eq) -- TODO: Pointers and memorychunks
   -- TODO: custom instance for Eq
 
 data FuncDef = FuncDef
@@ -39,7 +38,7 @@ data Expression = Bin BinOp Expression Expression SourceRange
                 | Un UnOp Expression SourceRange
                 | MemberAccess Expression String SourceRange
                 | Variable String SourceRange
-                | ExprFunc String [Expression]
+                | ExprFunc String [Expression] Type SourceRange
                 | ExprLit Literal SourceRange deriving Show
 
 data BinOp = Plus | Minus | Times | Divide | Remainder

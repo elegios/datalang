@@ -15,13 +15,14 @@ import qualified LLVM.General.AST.Operand as O
 import qualified LLVM.General.AST.CallingConvention as CC
 import qualified LLVM.General.AST.Constant as C
 import qualified LLVM.General.Module as M
+import LLVM.General.PrettyPrint
 import LLVM.General.Context
 import LLVM.General.Target
 import Control.Monad.Except (runExceptT, ExceptT(..))
 
-main = case generate ast (Map.fromList [(requestedSig, Right . O.ConstantOperand . C.GlobalReference (toFunctionType [] []) $ "main")]) of
-  Left errs -> print errs
-  Right mod -> writeObjectFile mod >> printModule mod
+main = case generate ast (Map.fromList [(requestedSig, Right . O.ConstantOperand . C.GlobalReference (toFunctionType [] [] $ toLLVMType I32) $ "main")]) of
+  Left errs -> putStrLn "errors: " >> print errs
+  Right mod -> putStrLn (showPretty mod) >> writeObjectFile mod >> putStrLn "result: " >> printModule mod
   where
     {-(requestedSig, ast) = (NormalSig "main" [] [], testAst)-}
     (requestedSig, ast) = (ExprSig "main" [] I32, exprAst)
@@ -48,11 +49,14 @@ exprAst :: Source
 exprAst = Source
   { functionDefinitions =
     [ ("main", FuncDef [] ["a"]
-      [ ShallowCopy (Variable "a" sr) (ExprLit (ILit 4 I32) sr) sr
+      [ ShallowCopy (Variable "a" sr) (ExprFunc "other" [] I32 sr) sr
       , If (ExprLit (BLit True) sr) (Scope
-        [ ShallowCopy (Variable "a" sr) (ExprLit (ILit 42 I32) sr) sr
+        [ FuncCall "other" [] [Variable "a" sr] sr
         , Terminator Return sr
         ] sr) Nothing sr
+      ], sr)
+    , ("other", FuncDef [] ["a"]
+      [ ShallowCopy (Variable "a" sr) (Bin Plus (Variable "a" sr) (ExprLit (ILit 2 I32) sr) sr) sr
       ], sr)
     ]
   , typeDefinitions = []

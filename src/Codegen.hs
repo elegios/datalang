@@ -84,7 +84,7 @@ generate source requests = case errs of
         Right res -> (res:) <$> generator
 
 generateFunction :: FuncSig -> CodeGen (Either ErrorMessage AST.Definition)
-generateFunction (NormalSig name inTs outTs) = do
+generateFunction sig@(NormalSig name inTs outTs) = do
   mFunc <- uses source $ find (\(s, _, _) -> s == name) . functionDefinitions
   case mFunc of
     Nothing -> return . Left . ErrorString $ "Function " ++ name ++ " not found"
@@ -92,16 +92,12 @@ generateFunction (NormalSig name inTs outTs) = do
       currGenState <- get
       let initState = FuncState currGenState Nothing Nothing (Ret Nothing []) locals 0 [] entryBlock
           entryBlock = BasicBlock "entry" [] . Do $ Ret Nothing []
-      return . runIdentity . runExceptT . flip evalStateT initState $ do
-        generateFunctionBody stmnts
-        use currentBlock >>= finalizeBlock
-        blocks <- use finalizedBlocks
-        return . AST.GlobalDefinition $ functionDefaults
-          { name = fromString name
-          , parameters = (params, False)
-          , basicBlocks = reverse blocks
-          , returnType = T.void
-          }
+      let eit = runIdentity . runExceptT . flip runStateT initState $ do
+            generateFunctionBody stmnts
+            constructFunctionDeclaration sig params T.void
+      case eit of
+        Left e -> return $ Left e
+        Right (res, st) -> put (_genState st) >> return (Right res)
       where
         locals = M.fromList . zip (innames ++ outnames) . zip paramLocals $ inTs ++ outTs
         paramLocals = zipWith LocalReference (toFunctionParams inTs outTs) names
@@ -109,37 +105,45 @@ generateFunction (NormalSig name inTs outTs) = do
         withNames = zipWith Parameter (toFunctionParams inTs outTs) names
         names = fromString <$> (innames ++ outnames)
 
-generateFunction (ExprSig name inTs outT) = do
+generateFunction sig@(ExprSig name inTs outT) = do
   currGenState <- get
   let initState = FuncState currGenState Nothing Nothing (Br "returnBlock" []) M.empty 0 [] entryBlock
       entryBlock = BasicBlock "entry" [] . Do $ Br "returnBlock" []
       retBlock = BasicBlock "returnBlock" [] . Do $ Ret Nothing []
-  return . runIdentity . runExceptT . flip evalStateT initState $ do
-    mFunc <- uses (genState . source . to functionDefinitions) $ find (\(s, _, _) -> s == name)
-    (_, FuncDef innames [outname] stmnts, _) <- justErr (ErrorString $ "Function " ++ name ++ " not found") mFunc -- TODO: ugly death on incorrect number of outarguments
+  let eit = runIdentity . runExceptT . flip runStateT initState $ do
+        mFunc <- uses (genState . source . to functionDefinitions) $ find (\(s, _, _) -> s == name)
+        (_, FuncDef innames [outname] stmnts, _) <- justErr (ErrorString $ "Function " ++ name ++ " not found") mFunc -- TODO: ugly death on incorrect number of outarguments
 
-    let initLocals = M.fromList . zip innames . zip paramLocals $ inTs
-        paramLocals = zipWith LocalReference (toFunctionParams inTs []) names
-        params = map (\f -> f []) withNames
-        withNames = zipWith Parameter (toFunctionParams inTs []) names
-        names = fromString <$> innames
+        let initLocals = M.fromList . zip innames . zip paramLocals $ inTs
+            paramLocals = zipWith LocalReference (toFunctionParams inTs []) names
+            params = map (\f -> f []) withNames
+            withNames = zipWith Parameter (toFunctionParams inTs []) names
+            names = fromString <$> innames
 
-    locals .= initLocals
-    generateFunctionBody $ VarInit outname outT undefined : stmnts
+        locals .= initLocals
+        generateFunctionBody $ VarInit outname outT undefined : stmnts
 
-    finalizeAndReplaceWith retBlock
-    (retOp, _) <- generateExpression (Variable outname undefined)
-    currentBlock . blockTerminator .= (Do $ Ret (Just retOp) [])
+        finalizeAndReplaceWith retBlock
+        (retOp, _) <- generateExpression (Variable outname undefined)
+        currentBlock . blockTerminator .= (Do $ Ret (Just retOp) [])
 
-    use currentBlock >>= finalizeBlock
-    blocks <- use finalizedBlocks
-    return . AST.GlobalDefinition $ functionDefaults
-      { name = fromString name
-      , parameters = (params, False)
-      , basicBlocks = reverse blocks
-      , returnType = toLLVMType outT
-      }
-    
+        constructFunctionDeclaration sig params $ toLLVMType outT
+  case eit of
+    Left e -> return $ Left e
+    Right (res, st) -> put (_genState st) >> return (Right res)
+
+constructFunctionDeclaration :: FuncSig -> [Parameter] -> T.Type -> FuncGen AST.Definition
+constructFunctionDeclaration sig params retty = do
+  use currentBlock >>= finalizeBlock
+  blocks <- use finalizedBlocks
+  mOpName <- uses (genState . requested . at sig) $ fmap extractNameFromCallableOperand
+  return . AST.GlobalDefinition $ functionDefaults
+    { name = fromJust mOpName
+    , parameters = (params, False)
+    , basicBlocks = reverse blocks
+    , returnType = retty
+    }
+
 generateFunctionBody :: [Statement] -> FuncGen ()
 generateFunctionBody [] = return ()
 
@@ -259,6 +263,12 @@ generateExpression (MemberAccess expression name sr) = do
   liftM (, t) . instr $ (Load False ptrOp Nothing 0 [], toLLVMType t)
   where
     constInt = ConstantOperand . C.Int 32
+
+generateExpression (ExprFunc name expressions t sr) = do
+  ops <- sequence $ generateExpression <$> expressions
+  funcOp <- requestFunction $ ExprSig name (snd <$> ops) t
+  retOp <- instr (Call False CC.C [] funcOp (zip (fst <$> ops) $ repeat []) [] [], toLLVMType t)
+  return (retOp, t)
 
 {-generateExpression (Un operator expression sr) = do-} -- TODO: Unary operators
   {-(expOp, t) <- generateExpression expression-}
@@ -394,29 +404,31 @@ requestFunction func = do
     requestWithOperand op = genState . requested . at func <?= op
     newRequest = do
       num <- getNextName
-      requestWithOperand . Right . ConstantOperand . C.GlobalReference (toFunctionType inTs outTs) . fromString $ name ++ show num
-    (name, inTs, outTs) = case func of
-      NormalSig n its ots -> (n, its, ots)
-      ExprSig n its ot -> (n, its, [ot])
+      requestWithOperand . Right . ConstantOperand . C.GlobalReference (toFunctionType inTs outTs retty) . fromString $ name ++ show num
+    (name, inTs, outTs, retty) = case func of
+      NormalSig n its ots -> (n, its, ots, T.void)
+      ExprSig n its ot -> (n, its, [], toLLVMType ot)
+
+extractNameFromCallableOperand :: CallableOperand -> Name
+extractNameFromCallableOperand (Right (ConstantOperand (C.GlobalReference _ n))) = n
 
 getFunctionOperand :: FuncSig -> GenState -> Maybe CallableOperand
 getFunctionOperand sig state = case M.lookup sig $ _generated state of
   Just o -> Just o
   Nothing -> M.lookup sig $ _requested state
 
-toFunctionType :: [Type] -> [Type] -> T.Type
-toFunctionType inTs outTs = (\ts -> T.FunctionType T.void ts False) $ toFunctionParams inTs outTs
+toFunctionType :: [Type] -> [Type] -> T.Type -> T.Type
+toFunctionType inTs outTs retty = (\ts -> T.FunctionType retty ts False) $ toFunctionParams inTs outTs
 
 toFunctionParams :: [Type] -> [Type] -> [T.Type]
 {-toFunctionParams inTs outTs = (toScalarType <$> inTs) ++ (T.ptr . toScalarType <$> outTs)-} --TODO: handle this instead in codegen for function
-toFunctionParams inTs outTs = toLLVMType <$> (inTs ++ outTs)
+toFunctionParams inTs outTs = T.ptr . toLLVMType <$> (inTs ++ outTs)
 
 toLLVMType :: Type -> T.Type
 toLLVMType t = fromMaybe composite $ M.lookup t typeMap
   where
     composite = case t of
       StructT parts -> T.StructureType False $ toLLVMType . snd <$> parts
-      FuncT ins outs -> toFunctionType ins outs
 
 typeMap :: M.Map Type T.Type
 typeMap = M.fromList
