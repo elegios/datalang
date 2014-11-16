@@ -6,8 +6,10 @@ data SourceRange = SourceRange SourceLoc SourceLoc deriving Show
 data Source = Source
   { functionDefinitions :: [Top FuncDef]
   , typeDefinitions :: [Top Type]
-  , constantDefinitions :: [Top Literal]
   }
+-- TODO: Some form of namespaces
+-- TODO: Constant support
+-- TODO: Function overloading and selection
 
 type Top a = (String, a, SourceRange)
 
@@ -15,8 +17,13 @@ data Type = I8 | I16 | I32 | I64
           | U8 | U16 | U32 | U64
           |            F32 | F64
           | BoolT
-          | StructT [(String, Type)] deriving (Show, Ord, Eq) -- TODO: Pointers and memorychunks
-  -- TODO: custom instance for Eq
+          | StructT [(String, Type)] deriving (Show, Ord, Eq)
+-- TODO: Pointers
+-- TODO: Memorychunks
+-- TODO: Named types => Find and prevent infinite recursive structures
+-- TODO: Parameterized types
+-- TODO: Function types
+-- TODO: Strings
 
 data FuncDef = FuncDef
   { inargs :: [String]
@@ -31,6 +38,9 @@ data Statement = FuncCall String [Expression] [Expression] SourceRange
                | Scope [Statement] SourceRange
                | Terminator TerminatorType SourceRange
                | VarInit String Type SourceRange deriving Show
+-- TODO: For, possibly for-each
+-- TODO: Switch, match or pattern match
+-- TODO: Zero-initialization
 
 data TerminatorType = Return | Break | Continue deriving (Show, Eq)
 
@@ -40,6 +50,7 @@ data Expression = Bin BinOp Expression Expression SourceRange
                 | Variable String SourceRange
                 | ExprFunc String [Expression] Type SourceRange
                 | ExprLit Literal SourceRange deriving Show
+-- TODO: Deref
 
 data BinOp = Plus | Minus | Times | Divide | Remainder
            | Lesser | Greater | LE | GE | Equal | NotEqual
@@ -49,7 +60,8 @@ data UnOp = Not | BinNegate | AriNegate deriving Show
 
 data Literal = ILit Integer Type
              | FLit Double Type
-             | BLit Bool deriving Show -- TODO: struct literals
+             | BLit Bool deriving Show
+-- TODO: struct literals
 
 {-
  - Several things that we want to represent cannot be using this ast.

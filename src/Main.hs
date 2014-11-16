@@ -45,7 +45,6 @@ testAst = Source
       ], sr)
     ]
   , typeDefinitions = []
-  , constantDefinitions = []
   }
 
 exprAst :: Source
@@ -63,7 +62,6 @@ exprAst = Source
       ], sr)
     ]
   , typeDefinitions = []
-  , constantDefinitions = []
   }
 
 

@@ -3,13 +3,7 @@
 
 module CodeGen where
 
-{- TODO:
- - Save a "stack trace" of requested functions, to make it easier to figure out
-   why a specific function was requested.
- - Deal with default sizes of i, u and f
- - Ensure that operations involving u types are actually unsigned, it's not
-   carried in the type
- -}
+-- TODO: Save a "stack trace" of requested functions, to make it easier to figure out why a specific function was requested.
 
 import Ast
 import Data.Maybe
