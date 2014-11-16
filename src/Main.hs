@@ -20,12 +20,12 @@ import LLVM.General.Context
 import LLVM.General.Target
 import Control.Monad.Except (runExceptT, ExceptT(..))
 
-main = case generate ast (Map.fromList [(requestedSig, Right . O.ConstantOperand . C.GlobalReference (toFunctionType [] [] $ toLLVMType I32) $ "main")]) of
+main = case generate ast (Map.fromList [(requestedSig, Right . O.ConstantOperand . C.GlobalReference (toFunctionType [] [] retty) $ "main")]) of
   Left errs -> putStrLn "errors: " >> print errs
   Right mod -> putStrLn (showPretty mod) >> writeObjectFile mod >> putStrLn "result: " >> printModule mod
   where
-    {-(requestedSig, ast) = (NormalSig "main" [] [], testAst)-}
-    (requestedSig, ast) = (ExprSig "main" [] I32, exprAst)
+    (requestedSig, ast, retty) = (NormalSig "main" [] [], testAst, T.void)
+    {-(requestedSig, ast, retty) = (ExprSig "main" [] I32, exprAst, toLLVMType I32)-}
 
 testAst :: Source
 testAst = Source
@@ -33,6 +33,9 @@ testAst = Source
     [ ("main", FuncDef [] []
       [ VarInit "a" U64 sr
       , ShallowCopy (Variable "a" sr) (Bin Plus (Variable "a" sr) (ExprLit (ILit 4 U64) sr) sr) sr
+      , VarInit "bo" BoolT sr
+      , ShallowCopy (Variable "bo" sr) (ExprLit (BLit True) sr) sr
+      , ShallowCopy (Variable "bo" sr) (ExprLit (BLit False) sr) sr
       , While (Bin Lesser (Variable "a" sr) (ExprLit (ILit 10 U64) sr) sr) (Scope
         [ ShallowCopy (Variable "a" sr) (Bin Times (Variable "a" sr) (ExprLit (ILit 2 U64) sr) sr) sr
         ] sr) sr
