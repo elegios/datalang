@@ -1,10 +1,7 @@
-{-# LANGUAGE OverloadedStrings #-}
-
 module Main where
 
 import CodeGen
 import Ast
-import Data.String (IsString, fromString)
 import qualified Data.Map as Map
 import qualified LLVM.General.AST as AST
 import qualified LLVM.General.AST.Global as G
@@ -20,7 +17,7 @@ import LLVM.General.Context
 import LLVM.General.Target
 import Control.Monad.Except (runExceptT, ExceptT(..))
 
-main = case generate ast (Map.fromList [(requestedSig, Right . O.ConstantOperand . C.GlobalReference (toFunctionType [] [] retty) $ "main")]) of
+main = case generate ast (Map.fromList [(requestedSig, Right . O.ConstantOperand . C.GlobalReference (toFunctionType [] [] retty) $ Name.Name "main")]) of
   Left errs -> putStrLn "errors: " >> print errs
   Right mod -> putStrLn (showPretty mod) >> writeObjectFile mod >> putStrLn "result: " >> printModule mod
   where
@@ -65,7 +62,9 @@ exprAst = Source
   }
 
 
+sr :: SourceRange
 sr = SourceRange SourceLoc SourceLoc
+
 writeObjectFile :: AST.Module -> IO (Either String ())
 writeObjectFile mod = withContext $ \context ->
     runExceptT $ M.withModuleFromAST context mod $ \m ->

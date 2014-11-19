@@ -28,7 +28,7 @@ data Type = I8 | I16 | I32 | I64
 data FuncDef = FuncDef
   { inargs :: [String]
   , outargs :: [String]
-  , stmnts :: [Statement]
+  , statements :: [Statement]
   } deriving Show
 
 data Statement = FuncCall String [Expression] [Expression] SourceRange

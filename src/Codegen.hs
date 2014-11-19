@@ -1,4 +1,3 @@
-{-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE TupleSections #-}
 
 module CodeGen where
@@ -8,18 +7,16 @@ module CodeGen where
 import Ast
 import Data.Maybe
 import Data.Functor ((<$>))
-import Data.String (IsString, fromString)
 import Data.List
 import Data.Word
-import Control.Lens
-import Control.Monad.State
+import Control.Lens hiding (op, index, parts)
+import Control.Monad.State (runStateT, StateT, get, put, gets)
 import Control.Monad.Except
-import Control.Monad.Identity
 import LLVM.General.AST.Operand
 import LLVM.General.AST.Name
 import LLVM.General.AST.Global
 import LLVM.General.AST.IntegerPredicate as IP
-import LLVM.General.AST.Instruction as I
+import LLVM.General.AST.Instruction as I hiding (condition, index)
 import qualified LLVM.General.AST.FloatingPointPredicate as FP
 import qualified LLVM.General.AST.Type as T
 import qualified LLVM.General.AST.CallingConvention as CC
@@ -34,7 +31,7 @@ type GenFuncs = M.Map FuncSig CallableOperand
 data GenState = GenState
   { _generated :: GenFuncs
   , _requested :: GenFuncs
-  , _nextName :: M.Map String Int
+  , _nextNameNumber :: M.Map String Int
   , _errors :: [ErrorMessage]
   , _source :: Source
   }
@@ -59,33 +56,33 @@ type CodeGen a = StateT GenState Identity a
 type FuncGen a = StateT FuncState (ExceptT ErrorMessage Identity) a
 
 generate :: Source -> GenFuncs -> Either [ErrorMessage] AST.Module
-generate source requests = case errs of
+generate sourceToGen requests = case errs of
   [] -> Right $ AST.defaultModule { AST.moduleDefinitions = defs }
   _ -> Left errs
   where
-    (defs, resState) = runIdentity . runStateT generator $ emptyState requests source
+    (defs, resState) = runIdentity . runStateT generator $ emptyState requests sourceToGen
     errs = _errors resState
     generator :: CodeGen [AST.Definition]
     generator = do
       mreq <- use $ requested . to M.minViewWithKey
       maybe (return []) runGenerateFunction mreq
     runGenerateFunction ((func, _), _) = do
-      res <- generateFunction func
+      eRes <- generateFunction func
       op <- requested . at func <<.= Nothing
       generated . at func .= op
-      case res of
+      case eRes of
         Left err -> (errors %= (err:)) >> generator
         Right res -> (res:) <$> generator
 
 generateFunction :: FuncSig -> CodeGen (Either ErrorMessage AST.Definition)
-generateFunction sig@(NormalSig name inTs outTs) = do
-  mFunc <- uses source $ find (\(s, _, _) -> s == name) . functionDefinitions
+generateFunction sig@(NormalSig fName inTs outTs) = do
+  mFunc <- uses source $ find (\(s, _, _) -> s == fName) . functionDefinitions
   case mFunc of
-    Nothing -> return . Left . ErrorString $ "Function " ++ name ++ " not found"
+    Nothing -> return . Left . ErrorString $ "Function " ++ fName ++ " not found"
     Just (_, FuncDef innames outnames stmnts, _) -> do
       currGenState <- get
-      let initState = FuncState currGenState Nothing Nothing (Ret Nothing []) locals 0 [] entryBlock
-          entryBlock = BasicBlock "entry" [] . Do $ Ret Nothing []
+      let initState = FuncState currGenState Nothing Nothing (Ret Nothing []) initialLocals 0 [] entryBlock
+          entryBlock = BasicBlock (Name "entry") [] . Do $ Ret Nothing []
       let eit = runIdentity . runExceptT . flip runStateT initState $ do
             generateFunctionBody stmnts
             constructFunctionDeclaration sig params T.void
@@ -93,26 +90,26 @@ generateFunction sig@(NormalSig name inTs outTs) = do
         Left e -> return $ Left e
         Right (res, st) -> put (_genState st) >> return (Right res)
       where
-        locals = M.fromList . zip (innames ++ outnames) . zip paramLocals $ inTs ++ outTs
+        initialLocals = M.fromList . zip (innames ++ outnames) . zip paramLocals $ inTs ++ outTs
         paramLocals = zipWith LocalReference (toFunctionParams inTs outTs) names
         params = map (\f -> f []) withNames
         withNames = zipWith Parameter (toFunctionParams inTs outTs) names
-        names = fromString <$> (innames ++ outnames)
+        names = Name <$> (innames ++ outnames)
 
-generateFunction sig@(ExprSig name inTs outT) = do
+generateFunction sig@(ExprSig fName inTs outT) = do
   currGenState <- get
-  let initState = FuncState currGenState Nothing Nothing (Br "returnBlock" []) M.empty 0 [] entryBlock
-      entryBlock = BasicBlock "entry" [] . Do $ Br "returnBlock" []
-      retBlock = BasicBlock "returnBlock" [] . Do $ Ret Nothing []
+  let initState = FuncState currGenState Nothing Nothing (Br (Name "returnBlock") []) M.empty 0 [] entryBlock
+      entryBlock = BasicBlock (Name "entry") [] . Do $ Br (Name "returnBlock") []
+      retBlock = BasicBlock (Name "returnBlock") [] . Do $ Ret Nothing []
   let eit = runIdentity . runExceptT . flip runStateT initState $ do
-        mFunc <- uses (genState . source . to functionDefinitions) $ find (\(s, _, _) -> s == name)
-        (_, FuncDef innames [outname] stmnts, _) <- justErr (ErrorString $ "Function " ++ name ++ " not found") mFunc -- TODO: ugly death on incorrect number of outarguments
+        mFunc <- uses (genState . source . to functionDefinitions) $ find (\(s, _, _) -> s == fName)
+        (_, FuncDef innames [outname] stmnts, _) <- justErr (ErrorString $ "Function " ++ fName ++ " not found") mFunc -- TODO: ugly death on incorrect number of outarguments
 
         let initLocals = M.fromList . zip innames . zip paramLocals $ inTs
             paramLocals = zipWith LocalReference (toFunctionParams inTs []) names
             params = map (\f -> f []) withNames
             withNames = zipWith Parameter (toFunctionParams inTs []) names
-            names = fromString <$> innames
+            names = Name <$> innames
 
         locals .= initLocals
         generateFunctionBody $ VarInit outname outT undefined : stmnts
@@ -141,9 +138,9 @@ constructFunctionDeclaration sig params retty = do
 generateFunctionBody :: [Statement] -> FuncGen ()
 generateFunctionBody [] = return ()
 
-generateFunctionBody (VarInit name t _ : stmnts) = do
+generateFunctionBody (VarInit vName t _ : stmnts) = do
   op <- instr (Alloca llvmType Nothing 0 [], llvmType)
-  locals . at name ?= (op, t)
+  locals . at vName ?= (op, t)
   generateFunctionBody stmnts
   where
     llvmType = toLLVMType t
@@ -157,7 +154,7 @@ generateFunctionBody (Terminator t sr : stmnts)
         target <- use (boolean breakTarget continueTarget $ t == Break)
         case target of
           Nothing -> throwError . ErrorString $ "Cannot break or continue at " ++ show sr ++ ", no loop."
-          Just name -> return $ Br name []
+          Just bName -> return $ Br bName []
     currentBlock . blockTerminator .= Do term
 
 generateFunctionBody (Scope inner _ : outer) = do
@@ -172,10 +169,10 @@ generateFunctionBody (ShallowCopy assignee expression sr : stmnts) = do
   uinstr $ Store False assOp expOp Nothing 0 []
   generateFunctionBody stmnts
 
-generateFunctionBody (FuncCall name inargs outargs sr : stmnts) = do
-  inOps <- sequence $ generateAssignableExpression <$> inargs -- TODO: generate scalars when inargs are scalars instead
-  outOps <- sequence $ generateAssignableExpression <$> outargs
-  funcOp <- requestFunction $ NormalSig name (snd <$> inOps) (snd <$> outOps)
+generateFunctionBody (FuncCall fName ins outs sr : stmnts) = do
+  inOps <- sequence $ generateAssignableExpression <$> ins -- TODO: generate scalars when ins are scalars instead
+  outOps <- sequence $ generateAssignableExpression <$> outs
+  funcOp <- requestFunction $ NormalSig fName (snd <$> inOps) (snd <$> outOps)
   uinstr $ Call False CC.C [] funcOp (zip (map fst $ inOps ++ outOps) $ repeat []) [] []
   generateFunctionBody stmnts
 
@@ -224,14 +221,14 @@ generateFunctionBody (If condition thenStmnt mElseStmnt sr : stmnts) = do
   generateFunctionBody stmnts
 
 generateAssignableExpression :: Expression -> FuncGen (Operand, Type)
-generateAssignableExpression (Variable name sr) = do
-  mOp <- use $ locals . at name
+generateAssignableExpression (Variable vName sr) = do
+  mOp <- use $ locals . at vName
   case mOp of
-    Nothing -> throwError . ErrorString $ "Unknown variable " ++ name ++ " at " ++ show sr
+    Nothing -> throwError . ErrorString $ "Unknown variable " ++ vName ++ " at " ++ show sr
     Just op -> return op
-generateAssignableExpression (MemberAccess expression name sr) = do
+generateAssignableExpression (MemberAccess expression mName sr) = do
   (bigOp, bigT) <- generateAssignableExpression expression
-  (index, t) <- findNameIndexInStruct name bigT sr
+  (index, t) <- findNameIndexInStruct mName bigT sr
   op <- instr (I.GetElementPtr False bigOp [constInt 0, constInt index] [], toLLVMType t)
   return (op, t)
   where
@@ -244,23 +241,23 @@ generateExpression (ExprLit lit sr) = return $ case lit of
   FLit val t -> (ConstantOperand . C.Float $ F.Double val, t)
   BLit val -> (ConstantOperand . C.Int 1 $ boolean 1 0 val, BoolT)
 
-generateExpression (Variable name sr) = do
-  mVal <- use $ locals . at name
+generateExpression (Variable vName sr) = do
+  mVal <- use $ locals . at vName
   case mVal of
-    Nothing -> throwError . ErrorString $ "Unknown variable " ++ name ++ " at " ++ show sr
+    Nothing -> throwError . ErrorString $ "Unknown variable " ++ vName ++ " at " ++ show sr
     Just (op, t) -> liftM (, t) . instr $ (Load False op Nothing 0 [], toLLVMType t)
 
-generateExpression (MemberAccess expression name sr) = do
+generateExpression (MemberAccess expression mName sr) = do
   (bigOp, bigT) <- generateExpression expression
-  (index, t) <- findNameIndexInStruct name bigT sr
+  (index, t) <- findNameIndexInStruct mName bigT sr
   ptrOp <- instr (GetElementPtr False bigOp [constInt 0, constInt index] [], toLLVMType t)
   liftM (, t) . instr $ (Load False ptrOp Nothing 0 [], toLLVMType t)
   where
     constInt = ConstantOperand . C.Int 32
 
-generateExpression (ExprFunc name expressions t sr) = do
+generateExpression (ExprFunc fName expressions t sr) = do
   ops <- sequence $ generateExpression <$> expressions
-  funcOp <- requestFunction $ ExprSig name (snd <$> ops) t
+  funcOp <- requestFunction $ ExprSig fName (snd <$> ops) t
   retOp <- instr (Call False CC.C [] funcOp (zip (fst <$> ops) $ repeat []) [] [], toLLVMType t)
   return (retOp, t)
 
@@ -332,14 +329,14 @@ generateExpression (Bin operator exp1 exp2 sr) = do
   binOp llvmOperator res1 res2
 
 binOp :: (Operand -> Operand -> InstructionMetadata -> Instruction) -> (Operand, Type) -> (Operand, Type) -> FuncGen (Operand, Type)
-binOp operator (op1, t1) (op2, t2)= do
+binOp operator (op1, t1) (op2, _) = do
   res <- instr (operator op1 op2 [], toLLVMType t1)
   return (res, t1)
 
 findNameIndexInStruct :: String -> Type -> SourceRange -> FuncGen (Integer, Type)
-findNameIndexInStruct name (StructT fields) sr = case find (\(_, (n, _)) -> n == name) $ zip [0..] fields of
+findNameIndexInStruct mName (StructT fields) sr = case find (\(_, (n, _)) -> n == mName) $ zip [0..] fields of
   Just (i, (_, t)) -> return (i, t)
-  Nothing -> throwError . ErrorString $ "Unknown member field " ++ name ++ " in struct at " ++ show sr
+  Nothing -> throwError . ErrorString $ "Unknown member field " ++ mName ++ " in struct at " ++ show sr
 findNameIndexInStruct _ _ sr = throwError . ErrorString $ "Attempt to access member field of non-struct type at " ++ show sr
 
 finalizeBlock :: BasicBlock -> FuncGen ()
@@ -351,22 +348,19 @@ finalizeAndReplaceWith b = (currentBlock <<.= b) >>= finalizeBlock
 fresh :: FuncGen Name
 fresh = liftM UnName $ nextFresh <<+= 1
 
-freshName :: String -> FuncGen Name
-freshName name = liftM (Name . (name ++) . show) $ nextFresh <<+= 1
-
 instr :: (Instruction, T.Type) -> FuncGen Operand
 instr (instruction, t) = do
-  name <- fresh
-  currentBlock . blockInstrs %= (name := instruction :)
-  return $ LocalReference t name
+  unname <- fresh
+  currentBlock . blockInstrs %= (unname := instruction :)
+  return $ LocalReference t unname
 
 uinstr :: Instruction -> FuncGen ()
 uinstr instruction = currentBlock . blockInstrs %= (Do instruction :)
 
 newBlock :: FuncGen BasicBlock
 newBlock = do
-  name <- fresh
-  return $ BasicBlock name [] (Do $ Ret Nothing [])
+  unname <- fresh
+  return $ BasicBlock unname [] (Do $ Ret Nothing [])
 
 isFloat :: Type -> Bool
 isFloat F32 = True
@@ -393,13 +387,13 @@ requestFunction func = do
   maybe newRequest return mo
   where
     getNextName :: FuncGen Int
-    getNextName = fromJust <$> (genState . nextName . at name <%= (Just . maybe 0 succ))
+    getNextName = fromJust <$> (genState . nextNameNumber . at fname <%= (Just . maybe 0 succ))
     requestWithOperand :: CallableOperand -> FuncGen CallableOperand
     requestWithOperand op = genState . requested . at func <?= op
     newRequest = do
       num <- getNextName
-      requestWithOperand . Right . ConstantOperand . C.GlobalReference (toFunctionType inTs outTs retty) . fromString $ name ++ show num
-    (name, inTs, outTs, retty) = case func of
+      requestWithOperand . Right . ConstantOperand . C.GlobalReference (toFunctionType inTs outTs retty) . Name $ fname ++ show num
+    (fname, inTs, outTs, retty) = case func of
       NormalSig n its ots -> (n, its, ots, T.void)
       ExprSig n its ot -> (n, its, [], toLLVMType ot)
 
@@ -470,9 +464,9 @@ requested :: Functor f => (GenFuncs -> f GenFuncs) -> GenState -> f GenState
 requested inj state = (\req -> state { _requested = req }) <$> inj (_requested state)
 {-# INLINE requested #-}
 
-nextName :: Functor f => (M.Map String Int -> f (M.Map String Int)) -> GenState -> f GenState
-nextName inj state = (\nn -> state { _nextName = nn }) <$> inj (_nextName state)
-{-# INLINE nextName #-}
+nextNameNumber :: Functor f => (M.Map String Int -> f (M.Map String Int)) -> GenState -> f GenState
+nextNameNumber inj state = (\nn -> state { _nextNameNumber = nn }) <$> inj (_nextNameNumber state)
+{-# INLINE nextNameNumber #-}
 
 source :: Functor f => (Source -> f Source) -> GenState -> f GenState
 source inj g = (\s -> g { _source = s }) <$> inj (_source g)
@@ -525,9 +519,6 @@ blockTerminator inj (BasicBlock n i t) = BasicBlock n i <$> inj t
 blockName :: Functor f => (Name-> f Name) -> BasicBlock -> f BasicBlock
 blockName inj (BasicBlock n i t) = (\n' -> BasicBlock n' i t) <$> inj n
 {-# INLINE blockName #-}
-
-instance IsString Name where
-  fromString = Name
 
 boolean :: a -> a -> Bool -> a
 boolean a _ True = a
