@@ -281,66 +281,103 @@ generateExpression (ExprFunc fName expressions t sr) = do
     {-AriNegate -> -}
 
 generateExpression (Bin operator exp1 exp2 sr) = do
-  res1@(_, t1) <- generateExpression exp1
-  res2@(_, t2) <- generateExpression exp2
-  when (t1 /= t2) . throwError . ErrorString $ "The expressions around " ++ show operator ++ " at " ++ show sr ++ " have different types (" ++ show t1 ++ " != " ++ show t2 ++ ")"
-  llvmOperator <- if isNum t1
+  res1@(_, n1) <- generateExpression exp1
+  t1 <- ensureTopNotNamed n1
+  case (t1, operator) of
+    (StructT _, _) -> structBins res1 exp2 t1 operator sr
+    (_, ShortAnd) -> shortcuts res1 exp2 ShortAnd sr
+    (_, ShortOr) -> shortcuts res1 exp2 ShortOr sr
+    _ -> do
+      res2@(_, n2) <- generateExpression exp2
+      t2 <- ensureTopNotNamed n2
+      when (t1 /= t2) . throwError . ErrorString $ "The expressions around " ++ show operator ++ " at " ++ show sr ++ " have different types (" ++ show t1 ++ " != " ++ show t2 ++ ")"
+      simpleBins res1 res2 t1 operator sr
+
+simpleBins :: (Operand, Type) -> (Operand, Type) -> Type -> BinOp -> SourceRange -> FuncGen (Operand, Type)
+simpleBins res1 res2 t operator sr = do
+  llvmOperator <- if isNum t
     then case operator of
-      Plus -> return $ if isFloat t1 then FAdd NoFastMathFlags else Add False False
-      Minus -> return $ if isFloat t1 then FSub NoFastMathFlags else Sub False False
-      Times -> return $ if isFloat t1 then FMul NoFastMathFlags else Mul False False
-      Divide -> return $ if isFloat t1
-        then FDiv NoFastMathFlags else if isUnsigned t1
+      Plus -> return $ if isFloat t then FAdd NoFastMathFlags else Add False False
+      Minus -> return $ if isFloat t then FSub NoFastMathFlags else Sub False False
+      Times -> return $ if isFloat t then FMul NoFastMathFlags else Mul False False
+      Divide -> return $ if isFloat t
+        then FDiv NoFastMathFlags else if isUnsigned t
           then UDiv False
           else SDiv False
-      Remainder -> return $ if isFloat t1
-        then FRem NoFastMathFlags else if isUnsigned t1
+      Remainder -> return $ if isFloat t
+        then FRem NoFastMathFlags else if isUnsigned t
           then URem
           else SRem
-      Lesser -> return $ if isFloat t1
+      Lesser -> return $ if isFloat t
         then FCmp FP.OLT
-        else ICmp $ if isUnsigned t1 then ULT else SLT
-      Greater -> return $ if isFloat t1
+        else ICmp $ if isUnsigned t then ULT else SLT
+      Greater -> return $ if isFloat t
         then FCmp FP.OGT
-        else ICmp $ if isUnsigned t1 then UGT else SGT
-      LE -> return $ if isFloat t1
+        else ICmp $ if isUnsigned t then UGT else SGT
+      LE -> return $ if isFloat t
         then FCmp FP.OLE
-        else ICmp $ if isUnsigned t1 then ULE else SLE
-      GE -> return $ if isFloat t1
+        else ICmp $ if isUnsigned t then ULE else SLE
+      GE -> return $ if isFloat t
         then FCmp FP.OGE
-        else ICmp $ if isUnsigned t1 then UGE else SGE
-      Equal -> return $ if isFloat t1
+        else ICmp $ if isUnsigned t then UGE else SGE
+      Equal -> return $ if isFloat t
         then FCmp FP.OEQ
         else ICmp IP.EQ
-      NotEqual -> return $ if isFloat t1
+      NotEqual -> return $ if isFloat t
         then FCmp FP.ONE
         else ICmp NE
-      BinAnd -> if isFloat t1
+      BinAnd -> if isFloat t
         then throwError . ErrorString $ "BinAnd is not applicable to floats: " ++ show sr
         else return AST.And
-      BinOr -> if isFloat t1
+      BinOr -> if isFloat t
         then throwError . ErrorString $ "BinOr is not applicable to floats: " ++ show sr
         else return AST.Or
-      Ast.Xor -> if isFloat t1
+      Ast.Xor -> if isFloat t
         then throwError . ErrorString $ "Xor is not applicable to floats: " ++ show sr
         else return AST.Xor
-      LShift -> if isFloat t1
+      LShift -> if isFloat t
         then throwError . ErrorString $ "LShift is not applicable to floats: " ++ show sr
         else return $ Shl False False
-      LogRShift -> if isFloat t1
+      LogRShift -> if isFloat t
         then throwError . ErrorString $ "LogRShift is not applicable to floats: " ++ show sr
         else return $ LShr False
-      AriRShift -> if isFloat t1
-        then throwError . ErrorString $ "LogRShift is not applicable to floats: " ++ show sr
+      AriRShift -> if isFloat t
+        then throwError . ErrorString $ "AriRShift is not applicable to floats: " ++ show sr
         else return $ AShr False
-      _ -> throwError . ErrorString $ show operator ++ " not supported for expressions of type " ++ show t1 ++ " at " ++ show sr
+      _ -> throwError . ErrorString $ show operator ++ " not supported for expressions of type " ++ show t ++ " at " ++ show sr
 
-    else case t1 of -- Non-numerical case
-      BoolT -> return . ICmp $ case operator of -- TODO: shortcutting &&/||
-        Equal -> IP.EQ
-        NotEqual -> IP.NE
-      -- TODO: struct binary operators
+    else case t of -- Non-numerical case
+      BoolT -> return $ case operator of
+        Equal -> ICmp IP.EQ
+        NotEqual -> ICmp IP.NE
+        LongAnd -> AST.And
+        LongOr -> AST.Or
   binOp llvmOperator res1 res2
+
+shortcuts :: (Operand, Type) -> Expression -> BinOp -> SourceRange -> FuncGen (Operand, Type)
+shortcuts (op1, _) exp2 operator sr = do
+  block2 <- newBlock
+  contBlock <- newBlock
+  prevName <- use $ currentBlock . blockName
+  let name2 = block2 ^. blockName
+      contName = contBlock ^. blockName
+      (trueName, falseName, shortResult) = case operator of
+        ShortAnd -> (name2, contName, 0)
+        ShortOr -> (contName, name2, 1)
+
+  prevTerminator <- use $ currentBlock . blockTerminator
+  currentBlock . blockTerminator .= (Do $ CondBr op1 trueName falseName [])
+
+  finalizeAndReplaceWith block2
+  (op2, _) <- generateExpression exp2
+  currentBlock . blockTerminator .= (Do $ Br contName [])
+
+  finalizeAndReplaceWith $ block2 & blockTerminator .~ prevTerminator
+  op <- instr (Phi T.i1 [(ConstantOperand $ C.Int 1 shortResult, prevName), (op2, name2)] [], T.i1)
+  return (op, BoolT)
+
+structBins = undefined
+-- TODO: struct binary operators
 
 binOp :: (Operand -> Operand -> InstructionMetadata -> Instruction) -> (Operand, Type) -> (Operand, Type) -> FuncGen (Operand, Type)
 binOp operator (op1, t1) (op2, _) = do

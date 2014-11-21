@@ -57,9 +57,10 @@ data Expression = Bin BinOp Expression Expression SourceRange
                 | ExprLit Literal SourceRange deriving Show
 -- TODO: Deref
 
+-- Short/Long And/Or means shortcutting/not shortcutting
 data BinOp = Plus | Minus | Times | Divide | Remainder
            | Lesser | Greater | LE | GE | Equal | NotEqual
-           | And | Or
+           | ShortAnd | ShortOr | LongAnd | LongOr 
            | BinAnd | BinOr | LShift | LogRShift | AriRShift | Xor deriving Show
 data UnOp = Not | BinNegate | AriNegate deriving Show
 
