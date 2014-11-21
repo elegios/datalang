@@ -26,9 +26,10 @@ main = case generate ast requested of
     case verifyResult of
       Left mess -> putStrLn $ "Verify error: " ++ mess
       Right _ -> do
-        writeObjectFile m
         putStrLn "result: "
-        printModule m)
+        printModule m
+        writeObjectFile m
+        )
   where
     -- (requestedSig, ast, normal) = (NormalSig "main" [] [], testAst, False)
     -- (requestedSig, ast, normal) = (ExprSig "main" [] I32, exprAst, True)
