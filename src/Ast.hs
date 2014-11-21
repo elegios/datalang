@@ -1,27 +1,31 @@
+{-# LANGUAGE DeriveDataTypeable #-}
+
 module Ast where
+
+import qualified Data.Map as M
+import Data.Data
 
 data SourceLoc = SourceLoc deriving Show
 data SourceRange = SourceRange SourceLoc SourceLoc deriving Show
 
 data Source = Source
-  { functionDefinitions :: [Top FuncDef]
-  , typeDefinitions :: [Top Type]
+  { functionDefinitions :: M.Map String FuncDef
+  , typeDefinitions :: M.Map String TypeDef
   }
 -- TODO: Some form of namespaces
 -- TODO: Constant support
 -- TODO: Function overloading and selection
 
-type Top a = (String, a, SourceRange)
-
 data Type = I8 | I16 | I32 | I64
           | U8 | U16 | U32 | U64
           |            F32 | F64
+          | NamedT String [Type]
           | BoolT
-          | StructT [(String, Type)] deriving (Show, Ord, Eq)
+          | StructT [(String, Type)] deriving (Show, Ord, Eq, Data, Typeable) -- TODO: Manual definition using uniplate.direct for speed
+data TypeDef = TypeDef Type [String] SourceRange deriving Show
 -- TODO: Pointers
 -- TODO: Memorychunks
--- TODO: Named types => Find and prevent infinite recursive structures
--- TODO: Parameterized types
+-- TODO: Find and prevent infinite recursive structures
 -- TODO: Function types
 -- TODO: Strings
 
@@ -29,6 +33,7 @@ data FuncDef = FuncDef
   { inargs :: [String]
   , outargs :: [String]
   , statements :: [Statement]
+  , sourcerange :: SourceRange
   } deriving Show
 
 data Statement = FuncCall String [Expression] [Expression] SourceRange

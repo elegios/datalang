@@ -9,7 +9,8 @@ import Data.Maybe
 import Data.Functor ((<$>))
 import Data.List
 import Data.Word
-import Control.Lens hiding (op, index, parts)
+import Data.Generics.Uniplate.Data
+import Control.Lens hiding (op, index, parts, transform)
 import Control.Monad.State (runStateT, StateT, get, put, gets)
 import Control.Monad.Except
 import LLVM.General.AST.Operand
@@ -32,6 +33,7 @@ data GenState = GenState
   { _generated :: GenFuncs
   , _requested :: GenFuncs
   , _nextNameNumber :: M.Map String Int
+  , _structTypes :: M.Map [Type] (AST.Definition, T.Type)
   , _errors :: [ErrorMessage]
   , _source :: Source
   }
@@ -48,7 +50,7 @@ data FuncState = FuncState
   }
 
 emptyState :: GenFuncs -> Source -> GenState
-emptyState reqs = GenState M.empty reqs M.empty []
+emptyState reqs = GenState M.empty reqs M.empty M.empty []
 
 data ErrorMessage = ErrorString String deriving Show
 
@@ -57,11 +59,12 @@ type FuncGen a = StateT FuncState (ExceptT ErrorMessage Identity) a
 
 generate :: Source -> GenFuncs -> Either [ErrorMessage] AST.Module
 generate sourceToGen requests = case errs of
-  [] -> Right $ AST.defaultModule { AST.moduleDefinitions = defs }
+  [] -> Right $ AST.defaultModule { AST.moduleDefinitions = structDefs ++ defs }
   _ -> Left errs
   where
     (defs, resState) = runIdentity . runStateT generator $ emptyState requests sourceToGen
     errs = _errors resState
+    structDefs = map fst . M.elems $ _structTypes resState
     generator :: CodeGen [AST.Definition]
     generator = do
       mreq <- use $ requested . to M.minViewWithKey
@@ -76,25 +79,21 @@ generate sourceToGen requests = case errs of
 
 generateFunction :: FuncSig -> CodeGen (Either ErrorMessage AST.Definition)
 generateFunction sig@(NormalSig fName inTs outTs) = do
-  mFunc <- uses source $ find (\(s, _, _) -> s == fName) . functionDefinitions
-  case mFunc of
-    Nothing -> return . Left . ErrorString $ "Function " ++ fName ++ " not found"
-    Just (_, FuncDef innames outnames stmnts, _) -> do
-      currGenState <- get
-      let initState = FuncState currGenState Nothing Nothing (Ret Nothing []) initialLocals 0 [] entryBlock
-          entryBlock = BasicBlock (Name "entry") [] . Do $ Ret Nothing []
-      let eit = runIdentity . runExceptT . flip runStateT initState $ do
-            generateFunctionBody stmnts
-            constructFunctionDeclaration sig params T.void
-      case eit of
-        Left e -> return $ Left e
-        Right (res, st) -> put (_genState st) >> return (Right res)
-      where
-        initialLocals = M.fromList . zip (innames ++ outnames) . zip paramLocals $ inTs ++ outTs
-        paramLocals = zipWith LocalReference (toFunctionParams inTs outTs) names
-        params = map (\f -> f []) withNames
-        withNames = zipWith Parameter (toFunctionParams inTs outTs) names
-        names = Name <$> (innames ++ outnames)
+  currGenState <- get
+  let initState = FuncState currGenState Nothing Nothing (Ret Nothing []) M.empty 0 [] entryBlock
+      entryBlock = BasicBlock (Name "entry") [] . Do $ Ret Nothing []
+  let eit = runIdentity . runExceptT . flip runStateT initState $ do
+        mFunc <- uses (genState. source . to functionDefinitions) $ M.lookup fName
+        (FuncDef innames outnames stmnts _) <- justErr (ErrorString $ "Function " ++ fName ++ " not found") mFunc
+
+        (initLocals, params) <- generateInitialFunctionLocals innames inTs outnames outTs
+        locals .= initLocals
+
+        generateFunctionBody stmnts
+        constructFunctionDeclaration sig params T.void
+  case eit of
+    Left e -> return $ Left e
+    Right (res, st) -> put (_genState st) >> return (Right res)
 
 generateFunction sig@(ExprSig fName inTs outT) = do
   currGenState <- get
@@ -102,26 +101,34 @@ generateFunction sig@(ExprSig fName inTs outT) = do
       entryBlock = BasicBlock (Name "entry") [] . Do $ Br (Name "returnBlock") []
       retBlock = BasicBlock (Name "returnBlock") [] . Do $ Ret Nothing []
   let eit = runIdentity . runExceptT . flip runStateT initState $ do
-        mFunc <- uses (genState . source . to functionDefinitions) $ find (\(s, _, _) -> s == fName)
-        (_, FuncDef innames [outname] stmnts, _) <- justErr (ErrorString $ "Function " ++ fName ++ " not found") mFunc -- TODO: ugly death on incorrect number of outarguments
+        mFunc <- uses (genState . source . to functionDefinitions) $ M.lookup fName
+        (FuncDef innames [outname] stmnts _) <- justErr (ErrorString $ "Function " ++ fName ++ " not found") mFunc -- TODO: ugly death on incorrect number of outarguments
 
-        let initLocals = M.fromList . zip innames . zip paramLocals $ inTs
-            paramLocals = zipWith LocalReference (toFunctionParams inTs []) names
-            params = map (\f -> f []) withNames
-            withNames = zipWith Parameter (toFunctionParams inTs []) names
-            names = Name <$> innames
-
+        (initLocals, params) <- generateInitialFunctionLocals innames inTs [] []
         locals .= initLocals
+
         generateFunctionBody $ VarInit outname outT undefined : stmnts
 
         finalizeAndReplaceWith retBlock
         (retOp, _) <- generateExpression (Variable outname undefined)
         currentBlock . blockTerminator .= (Do $ Ret (Just retOp) [])
 
-        constructFunctionDeclaration sig params $ toLLVMType outT
+        toLLVMType outT >>= constructFunctionDeclaration sig params
   case eit of
     Left e -> return $ Left e
     Right (res, st) -> put (_genState st) >> return (Right res)
+
+generateInitialFunctionLocals :: [String] -> [Type] -> [String] -> [Type] -> FuncGen (M.Map String (Operand, Type), [Parameter])
+generateInitialFunctionLocals innames inTs outnames outTs = do
+  llvmparams <- toFunctionParams inTs outTs
+  let names = Name <$> (innames ++ outnames)
+
+      withNames = zipWith Parameter llvmparams names
+      params = map (\f -> f []) withNames
+
+      paramLocals = zipWith LocalReference llvmparams names
+      initialLocals = M.fromList . zip (innames ++ outnames) . zip paramLocals $ inTs ++ outTs
+  return (initialLocals, params)
 
 constructFunctionDeclaration :: FuncSig -> [Parameter] -> T.Type -> FuncGen AST.Definition
 constructFunctionDeclaration sig params retty = do
@@ -139,11 +146,11 @@ generateFunctionBody :: [Statement] -> FuncGen ()
 generateFunctionBody [] = return ()
 
 generateFunctionBody (VarInit vName t _ : stmnts) = do
-  op <- instr (Alloca llvmType Nothing 0 [], llvmType)
-  locals . at vName ?= (op, t)
+  realT <- ensureTopNotNamed t
+  llvmtype <- toLLVMType realT
+  op <- instr (Alloca llvmtype Nothing 0 [], T.ptr llvmtype)
+  locals . at vName ?= (op, realT)
   generateFunctionBody stmnts
-  where
-    llvmType = toLLVMType t
 
 generateFunctionBody (Terminator t sr : stmnts)
   | not $ null stmnts = throwError . ErrorString $ "There are statements after the terminator at " ++ show sr
@@ -226,11 +233,14 @@ generateAssignableExpression (Variable vName sr) = do
   case mOp of
     Nothing -> throwError . ErrorString $ "Unknown variable " ++ vName ++ " at " ++ show sr
     Just op -> return op
+
 generateAssignableExpression (MemberAccess expression mName sr) = do
   (bigOp, bigT) <- generateAssignableExpression expression
   (index, t) <- findNameIndexInStruct mName bigT sr
-  op <- instr (I.GetElementPtr False bigOp [constInt 0, constInt index] [], toLLVMType t)
-  return (op, t)
+  realT <- ensureTopNotNamed t
+  llvmtype <- T.ptr <$> toLLVMType realT
+  op <- instr (I.GetElementPtr False bigOp [constInt 0, constInt index] [], llvmtype)
+  return (op, realT)
   where
     constInt = ConstantOperand . C.Int 32
 
@@ -245,20 +255,24 @@ generateExpression (Variable vName sr) = do
   mVal <- use $ locals . at vName
   case mVal of
     Nothing -> throwError . ErrorString $ "Unknown variable " ++ vName ++ " at " ++ show sr
-    Just (op, t) -> liftM (, t) . instr $ (Load False op Nothing 0 [], toLLVMType t)
+    Just (op, t) -> do
+      llvmtype <- toLLVMType t
+      i <-  instr (Load False op Nothing 0 [], llvmtype)
+      return (i, t)
 
 generateExpression (MemberAccess expression mName sr) = do
   (bigOp, bigT) <- generateExpression expression
   (index, t) <- findNameIndexInStruct mName bigT sr
-  ptrOp <- instr (GetElementPtr False bigOp [constInt 0, constInt index] [], toLLVMType t)
-  liftM (, t) . instr $ (Load False ptrOp Nothing 0 [], toLLVMType t)
-  where
-    constInt = ConstantOperand . C.Int 32
+  realT <- ensureTopNotNamed t
+  llvmtype <- toLLVMType realT
+  ptrOp <- instr (ExtractValue bigOp [fromInteger index] [], llvmtype)
+  return (ptrOp, realT)
 
 generateExpression (ExprFunc fName expressions t sr) = do
   ops <- sequence $ generateExpression <$> expressions
   funcOp <- requestFunction $ ExprSig fName (snd <$> ops) t
-  retOp <- instr (Call False CC.C [] funcOp (zip (fst <$> ops) $ repeat []) [] [], toLLVMType t)
+  llvmtype <- toLLVMType t
+  retOp <- instr (Call False CC.C [] funcOp (zip (fst <$> ops) $ repeat []) [] [], llvmtype)
   return (retOp, t)
 
 {-generateExpression (Un operator expression sr) = do-} -- TODO: Unary operators
@@ -330,7 +344,8 @@ generateExpression (Bin operator exp1 exp2 sr) = do
 
 binOp :: (Operand -> Operand -> InstructionMetadata -> Instruction) -> (Operand, Type) -> (Operand, Type) -> FuncGen (Operand, Type)
 binOp operator (op1, t1) (op2, _) = do
-  res <- instr (operator op1 op2 [], toLLVMType t1)
+  llvmt <- toLLVMType t1
+  res <- instr (operator op1 op2 [], llvmt)
   return (res, t1)
 
 findNameIndexInStruct :: String -> Type -> SourceRange -> FuncGen (Integer, Type)
@@ -392,10 +407,11 @@ requestFunction func = do
     requestWithOperand op = genState . requested . at func <?= op
     newRequest = do
       num <- getNextName
-      requestWithOperand . Right . ConstantOperand . C.GlobalReference (toFunctionType inTs outTs retty) . Name $ fname ++ show num
+      llvmt <- toFunctionType inTs outTs retty
+      requestWithOperand . Right . ConstantOperand . C.GlobalReference llvmt . Name $ fname ++ show num
     (fname, inTs, outTs, retty) = case func of
-      NormalSig n its ots -> (n, its, ots, T.void)
-      ExprSig n its ot -> (n, its, [], toLLVMType ot)
+      NormalSig n its ots -> (n, its, ots, Nothing)
+      ExprSig n its ot -> (n, its, [], Just ot)
 
 extractNameFromCallableOperand :: CallableOperand -> Name
 extractNameFromCallableOperand (Right (ConstantOperand (C.GlobalReference _ n))) = n
@@ -405,18 +421,52 @@ getFunctionOperand sig state = case M.lookup sig $ _generated state of
   Just o -> Just o
   Nothing -> M.lookup sig $ _requested state
 
-toFunctionType :: [Type] -> [Type] -> T.Type -> T.Type
-toFunctionType inTs outTs retty = (\ts -> T.FunctionType retty ts False) $ toFunctionParams inTs outTs
+toFunctionType :: [Type] -> [Type] -> Maybe Type -> FuncGen T.Type
+toFunctionType inTs outTs retty = do
+  llvmretty <- maybe (return T.void) toLLVMType retty
+  ts <- toFunctionParams inTs outTs
+  return $ T.FunctionType llvmretty ts False
 
-toFunctionParams :: [Type] -> [Type] -> [T.Type]
-{-toFunctionParams inTs outTs = (toScalarType <$> inTs) ++ (T.ptr . toScalarType <$> outTs)-} --TODO: handle this instead in codegen for function
-toFunctionParams inTs outTs = T.ptr . toLLVMType <$> (inTs ++ outTs)
+toFunctionParams :: [Type] -> [Type] -> FuncGen [T.Type]
+-- toFunctionParams inTs outTs = do --TODO: deal with this instead when inargs are properly marked as immutable
+--   its <- sequence $ toLLVMType <$> inTs
+--   ots <- sequence $ toLLVMType <$> outTs
+--   return $ its ++ (T.ptr <$> ots)
+toFunctionParams inTs outTs = (map T.ptr <$>) . sequence $ toLLVMType <$> (inTs ++ outTs)
 
-toLLVMType :: Type -> T.Type
-toLLVMType t = fromMaybe composite $ M.lookup t typeMap
-  where
-    composite = case t of
-      StructT parts -> T.StructureType False $ toLLVMType . snd <$> parts
+ensureTopNotNamed :: Type -> FuncGen Type
+ensureTopNotNamed (NamedT tName ts) = do
+  mType <- uses (genState . source) $ M.lookup tName . typeDefinitions
+  case mType of
+    Nothing -> throwError . ErrorString $ "Unknown type " ++ tName
+    Just (TypeDef it tNames _) -> return $ transform replaceParamTypes it
+      where
+        translation = M.fromList $ zip tNames ts
+        replaceParamTypes x@(NamedT innerTName []) = fromMaybe x $ M.lookup innerTName translation
+        replaceParamTypes x = x
+ensureTopNotNamed x = return x
+
+toLLVMType :: Type -> FuncGen T.Type
+toLLVMType nt = ensureTopNotNamed nt >>= \t -> case t of
+  StructT props -> do
+    mType <- use $ genState . structTypes . at (snd <$> props)
+    case mType of
+      Just (_, ret) -> return ret
+      Nothing -> do
+        n <- use $ genState . structTypes . to M.size
+        let llvmname = Name $ "struct" ++ show n
+            llvmtype = T.NamedTypeReference llvmname
+        genState . structTypes . at (snd <$> props) ?= (undefined, llvmtype)
+        -- This enables recursion. Since the actual llvm top-level definition
+        -- won't be used until the entire call to toLLVMType is done it is okay
+        -- to have an undefined there as it won't actually be accessed.
+        inners <- sequence $ toLLVMType . snd <$> props
+        let struct = AST.TypeDefinition llvmname . Just $ T.StructureType False inners
+        genState . structTypes . at (snd <$> props) ?= (struct, llvmtype)
+        return llvmtype
+  _ -> case M.lookup t typeMap of
+    Just llvmtype -> return llvmtype
+    Nothing -> throwError . ErrorString $ "Missed a case in the compiler, there is a type that cannot be converted to an LLVM type: " ++ show t
 
 typeMap :: M.Map Type T.Type
 typeMap = M.fromList
@@ -467,6 +517,10 @@ requested inj state = (\req -> state { _requested = req }) <$> inj (_requested s
 nextNameNumber :: Functor f => (M.Map String Int -> f (M.Map String Int)) -> GenState -> f GenState
 nextNameNumber inj state = (\nn -> state { _nextNameNumber = nn }) <$> inj (_nextNameNumber state)
 {-# INLINE nextNameNumber #-}
+
+structTypes :: Functor f => (M.Map [Type] (AST.Definition, T.Type) -> f (M.Map [Type] (AST.Definition, T.Type))) -> GenState -> f GenState
+structTypes inj state = (\st -> state { _structTypes = st }) <$> inj (_structTypes state)
+{-# INLINE structTypes #-}
 
 source :: Functor f => (Source -> f Source) -> GenState -> f GenState
 source inj g = (\s -> g { _source = s }) <$> inj (_source g)

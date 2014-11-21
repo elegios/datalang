@@ -15,18 +15,32 @@ import qualified LLVM.General.Module as M
 import LLVM.General.PrettyPrint
 import LLVM.General.Context
 import LLVM.General.Target
+import LLVM.General.Analysis
+import System.Exit
 import Control.Monad.Except (runExceptT, ExceptT(..))
 
-main = case generate ast (Map.fromList [(requestedSig, Right . O.ConstantOperand . C.GlobalReference (toFunctionType [] [] retty) $ Name.Name "main")]) of
+main = case generate ast requested of
   Left errs -> putStrLn "errors: " >> print errs
-  Right mod -> putStrLn (showPretty mod) >> writeObjectFile mod >> putStrLn "result: " >> printModule mod
+  Right mod -> putStrLn (showPretty mod) >> asGeneralModule mod (\m -> do
+    verifyResult <- runExceptT $ verify m
+    case verifyResult of
+      Left mess -> putStrLn $ "Verify error: " ++ mess
+      Right _ -> do
+        writeObjectFile m
+        putStrLn "result: "
+        printModule m)
   where
-    (requestedSig, ast, retty) = (NormalSig "main" [] [], testAst, T.void)
-    {-(requestedSig, ast, retty) = (ExprSig "main" [] I32, exprAst, toLLVMType I32)-}
+    -- (requestedSig, ast, normal) = (NormalSig "main" [] [], testAst, False)
+    -- (requestedSig, ast, normal) = (ExprSig "main" [] I32, exprAst, True)
+    (requestedSig, ast, normal) = (ExprSig "main" [] I32, fancyTypes, True)
+    requested = Map.fromList [(requestedSig, Right . O.ConstantOperand . C.GlobalReference llvmt $ Name.Name "main")]
+    llvmt = if normal
+      then T.FunctionType T.i32 [] False
+      else T.FunctionType T.void [] False
 
 testAst :: Source
 testAst = Source
-  { functionDefinitions =
+  { functionDefinitions = Map.fromList
     [ ("main", FuncDef [] []
       [ VarInit "a" U64 sr
       , ShallowCopy (Variable "a" sr) (Bin Plus (Variable "a" sr) (ExprLit (ILit 4 U64) sr) sr) sr
@@ -39,47 +53,62 @@ testAst = Source
       , While (Bin Lesser (Variable "a" sr) (ExprLit (ILit 1000000000 U64) sr) sr) (Scope
         [ ShallowCopy (Variable "a" sr) (Bin Plus (Variable "a" sr) (ExprLit (ILit 1 U64) sr) sr) sr
         ] sr) sr
-      ], sr)
+      ] sr)
     ]
-  , typeDefinitions = []
+  , typeDefinitions = Map.empty
   }
 
 exprAst :: Source
 exprAst = Source
-  { functionDefinitions =
+  { functionDefinitions = Map.fromList
     [ ("main", FuncDef [] ["a"]
       [ ShallowCopy (Variable "a" sr) (ExprFunc "other" [] I32 sr) sr
       , If (ExprLit (BLit True) sr) (Scope
         [ FuncCall "other" [] [Variable "a" sr] sr
         , Terminator Return sr
         ] sr) Nothing sr
-      ], sr)
+      ] sr)
     , ("other", FuncDef [] ["a"]
       [ ShallowCopy (Variable "a" sr) (Bin Plus (Variable "a" sr) (ExprLit (ILit 2 I32) sr) sr) sr
-      ], sr)
+      ] sr)
     ]
-  , typeDefinitions = []
+  , typeDefinitions = Map.empty
   }
 
+fancyTypes :: Source
+fancyTypes = Source
+  { functionDefinitions = Map.fromList
+    [ ("main", FuncDef [] ["ret"]
+      [ VarInit "tup" (NamedT "Tuple" [U32, U32]) sr
+      , ShallowCopy (MemberAccess (Variable "tup" sr) "a" sr) (ExprLit (ILit 2 U32) sr) sr
+      , ShallowCopy (MemberAccess (Variable "tup" sr) "b" sr) (ExprLit (ILit 3 U32) sr) sr
+      , ShallowCopy (Variable "ret" sr) (Bin Plus (MemberAccess (Variable "tup" sr) "a" sr) (Bin Times (ExprLit (ILit 10 U32) sr) (MemberAccess (Variable "tup" sr) "b" sr) sr) sr) sr
+      ] sr)
+    ]
+  , typeDefinitions = Map.fromList
+    [ ("Tuple", TypeDef (
+      StructT [("a", NamedT "a" []), ("b", NamedT "b" [])]
+      ) ["a", "b"] sr)]
+  }
 
 sr :: SourceRange
 sr = SourceRange SourceLoc SourceLoc
 
-writeObjectFile :: AST.Module -> IO (Either String ())
-writeObjectFile mod = withContext $ \context ->
-    runExceptT $ M.withModuleFromAST context mod $ \m ->
-      failIO . withDefaultTargetMachine $ \mac -> failIO $ M.writeObjectToFile mac (M.File "test.o") m
+writeObjectFile :: M.Module -> IO ()
+writeObjectFile mod = failIO . withDefaultTargetMachine $ \mac -> failIO $ M.writeObjectToFile mac (M.File "test.o") mod
 
-printModule :: AST.Module -> IO ()
-printModule mod =
-  withContext $ \context -> do
-    runExceptT $ M.withModuleFromAST context mod $ \m -> do
-      s <- M.moduleLLVMAssembly m
-      putStrLn s
-    return ()
+printModule :: M.Module -> IO ()
+printModule mod = M.moduleLLVMAssembly mod >>= putStrLn
 
 failIO :: ExceptT String IO a -> IO a
 failIO e = runExceptT e >>= \r -> case r of
   Left err -> fail err
   Right a -> return a
 
+asGeneralModule :: AST.Module -> (M.Module -> IO a) -> IO a
+asGeneralModule mod monad = do
+  res <- withContext $ \context ->
+    runExceptT . M.withModuleFromAST context mod $ monad
+  case res of
+    Left mess -> fail mess
+    Right res -> return res
