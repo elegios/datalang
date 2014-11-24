@@ -275,21 +275,33 @@ generateExpression (ExprFunc fName expressions t sr) = do
   retOp <- instr (Call False CC.C [] funcOp (zip (fst <$> ops) $ repeat []) [] [], llvmtype)
   return (retOp, t)
 
-{-generateExpression (Un operator expression sr) = do-} -- TODO: Unary operators
-  {-(expOp, t) <- generateExpression expression-}
-  {-case operator of-}
-    {-AriNegate -> -}
+-- TODO: ugly deaths in generateExpression for UnOps
+generateExpression (Un operator expression sr) = do
+  (expOp, t) <- generateExpression expression
+  llvmtype <- toLLVMType t
+  res <- instr . (, llvmtype) $ case operator of
+    AriNegate -> if isFloat t
+      then FSub NoFastMathFlags (zero t) expOp []
+      else Sub False False (zero t) expOp []
+    Not -> AST.Xor (one t) expOp []
+    BinNegate -> AST.Xor (one t) expOp []
+  return (res, t)
+  where
+    zero t = if isFloat t
+      then ConstantOperand . C.Float $ F.Double 0
+      else ConstantOperand $ C.Int size 0
+      where size = fromJust $ M.lookup t typeSizeMap
+    one t = ConstantOperand $ C.Int size 0
+      where size = fromJust $ M.lookup t typeSizeMap
 
 generateExpression (Bin operator exp1 exp2 sr) = do
-  res1@(_, n1) <- generateExpression exp1
-  t1 <- ensureTopNotNamed n1
+  res1@(_, t1) <- generateExpression exp1
   case (t1, operator) of
     (StructT _, _) -> structBins res1 exp2 t1 operator sr
     (_, ShortAnd) -> shortcuts res1 exp2 ShortAnd sr
     (_, ShortOr) -> shortcuts res1 exp2 ShortOr sr
     _ -> do
-      res2@(_, n2) <- generateExpression exp2
-      t2 <- ensureTopNotNamed n2
+      res2@(_, t2) <- generateExpression exp2
       when (t1 /= t2) . throwError . ErrorString $ "The expressions around " ++ show operator ++ " at " ++ show sr ++ " have different types (" ++ show t1 ++ " != " ++ show t2 ++ ")"
       simpleBins res1 res2 t1 operator sr
 
