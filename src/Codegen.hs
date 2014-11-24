@@ -244,6 +244,11 @@ generateAssignableExpression (MemberAccess expression mName sr) = do
   where
     constInt = ConstantOperand . C.Int 32
 
+generateAssignableExpression (Un Deref expression sr) = do
+  (expOp, PointerT t) <- generateExpression expression
+  realT <- ensureTopNotNamed t
+  return (expOp, realT)
+
 generateExpression :: Expression -> FuncGen (Operand, Type)
 generateExpression (ExprLit lit sr) = return $ case lit of
   ILit val t -> (ConstantOperand $ C.Int size val, t)
@@ -276,6 +281,12 @@ generateExpression (ExprFunc fName expressions t sr) = do
   return (retOp, t)
 
 -- TODO: ugly deaths in generateExpression for UnOps
+generateExpression (Un Deref expression sr) = do
+  (expOp, PointerT t) <- generateExpression expression
+  realT <- ensureTopNotNamed t
+  llvmtype <- toLLVMType realT
+  res <- instr (Load False expOp Nothing 0 [], llvmtype)
+  return (res, realT)
 generateExpression (Un operator expression sr) = do
   (expOp, t) <- generateExpression expression
   llvmtype <- toLLVMType t
@@ -513,6 +524,7 @@ toLLVMType nt = ensureTopNotNamed nt >>= \t -> case t of
         let struct = AST.TypeDefinition llvmname . Just $ T.StructureType False inners
         genState . structTypes . at (snd <$> props) ?= (struct, llvmtype)
         return llvmtype
+  PointerT inner -> T.ptr <$> toLLVMType inner
   _ -> case M.lookup t typeMap of
     Just llvmtype -> return llvmtype
     Nothing -> throwError . ErrorString $ "Missed a case in the compiler, there is a type that cannot be converted to an LLVM type: " ++ show t

@@ -21,6 +21,7 @@ data Type = I8 | I16 | I32 | I64
           |            F32 | F64
           | NamedT String [Type]
           | BoolT
+          | PointerT Type
           | StructT [(String, Type)] deriving (Show, Ord, Eq, Data, Typeable) -- TODO: Manual definition using uniplate.direct for speed
 data TypeDef = TypeDef Type [String] SourceRange deriving Show
 -- TODO: Pointers
@@ -62,7 +63,7 @@ data BinOp = Plus | Minus | Times | Divide | Remainder
            | Lesser | Greater | LE | GE | Equal | NotEqual
            | ShortAnd | ShortOr | LongAnd | LongOr 
            | BinAnd | BinOr | LShift | LogRShift | AriRShift | Xor deriving Show
-data UnOp = Not | BinNegate | AriNegate deriving Show
+data UnOp = Not | BinNegate | AriNegate | Deref deriving Show
 
 data Literal = ILit Integer Type
              | FLit Double Type

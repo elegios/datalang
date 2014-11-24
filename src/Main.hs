@@ -33,7 +33,8 @@ main = case generate ast requested of
   where
     -- (requestedSig, ast, normal) = (NormalSig "main" [] [], testAst, False)
     -- (requestedSig, ast, normal) = (ExprSig "main" [] I32, exprAst, True)
-    (requestedSig, ast, normal) = (ExprSig "main" [] I32, fancyTypes, True)
+    -- (requestedSig, ast, normal) = (ExprSig "main" [] I32, fancyTypes, True)
+    (requestedSig, ast, normal) = (ExprSig "main" [] I32, nonRunnablePointers, True)
     requested = Map.fromList [(requestedSig, Right . O.ConstantOperand . C.GlobalReference llvmt $ Name.Name "main")]
     llvmt = if normal
       then T.FunctionType T.i32 [] False
@@ -90,6 +91,19 @@ fancyTypes = Source
     [ ("Tuple", TypeDef (
       StructT [("a", NamedT "a" []), ("b", NamedT "b" [])]
       ) ["a", "b"] sr)]
+  }
+
+nonRunnablePointers :: Source
+nonRunnablePointers = Source
+  { functionDefinitions = Map.fromList
+    [ ("main", FuncDef [] ["ret"]
+      [ VarInit "p" (PointerT U32) sr
+      , ShallowCopy (Un Deref (Variable "p" sr) sr) (ExprLit (ILit 4 U32) sr) sr
+      , ShallowCopy (Variable "ret" sr) (Un Deref (Variable "p" sr) sr) sr
+      ] sr)
+    ]
+  , typeDefinitions = Map.fromList
+    []
   }
 
 sr :: SourceRange
