@@ -21,7 +21,7 @@ import Control.Monad.Except (runExceptT, ExceptT(..))
 
 main = case generate ast requested of
   Left errs -> putStrLn "errors: " >> print errs
-  Right mod -> putStrLn (showPretty mod) >> asGeneralModule mod (\m -> do
+  Right mod -> asGeneralModule mod (\m -> do
     verifyResult <- runExceptT $ verify m
     case verifyResult of
       Left mess -> putStrLn $ "Verify error: " ++ mess
