@@ -287,6 +287,8 @@ generateExpression (Un Deref expression sr) = do
   llvmtype <- toLLVMType realT
   res <- instr (Load False expOp Nothing 0 [], llvmtype)
   return (res, realT)
+generateExpression (Un AddressOf expression sr) =
+  (_2 %~ PointerT) <$> generateAssignableExpression expression
 generateExpression (Un operator expression sr) = do
   (expOp, t) <- generateExpression expression
   llvmtype <- toLLVMType t

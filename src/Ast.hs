@@ -63,7 +63,7 @@ data BinOp = Plus | Minus | Times | Divide | Remainder
            | Lesser | Greater | LE | GE | Equal | NotEqual
            | ShortAnd | ShortOr | LongAnd | LongOr 
            | BinAnd | BinOr | LShift | LogRShift | AriRShift | Xor deriving Show
-data UnOp = Not | BinNegate | AriNegate | Deref deriving Show
+data UnOp = Not | BinNegate | AriNegate | Deref | AddressOf deriving Show
 
 data Literal = ILit Integer Type
              | FLit Double Type
