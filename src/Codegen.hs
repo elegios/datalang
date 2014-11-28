@@ -310,7 +310,9 @@ generateExpression (Un operator expression sr) = do
 generateExpression (Bin operator exp1 exp2 sr) = do
   res1@(_, t1) <- generateExpression exp1
   case (t1, operator) of
-    (StructT _, _) -> structBins res1 exp2 t1 operator sr
+    (StructT props, _) -> do
+      res2 <- generateExpression exp2
+      structBins res1 res2 props operator sr
     (_, ShortAnd) -> shortcuts res1 exp2 ShortAnd sr
     (_, ShortOr) -> shortcuts res1 exp2 ShortOr sr
     _ -> do
@@ -377,6 +379,9 @@ simpleBins res1 res2 t operator sr = do
         NotEqual -> ICmp IP.NE
         LongAnd -> AST.And
         LongOr -> AST.Or
+      PointerT _ -> return $ case operator of
+        Equal -> ICmp IP.EQ
+        NotEqual -> ICmp IP.NE
   binOp llvmOperator res1 res2
 
 shortcuts :: (Operand, Type) -> Expression -> BinOp -> SourceRange -> FuncGen (Operand, Type)
@@ -401,8 +406,23 @@ shortcuts (op1, _) exp2 operator sr = do
   op <- instr (Phi T.i1 [(ConstantOperand $ C.Int 1 shortResult, prevName), (op2, name2)] [], T.i1)
   return (op, BoolT)
 
-structBins = undefined
--- TODO: struct binary operators
+structBins :: (Operand, Type) -> (Operand, Type) -> [(String, Type)] -> BinOp -> SourceRange -> FuncGen (Operand, Type)
+-- TODO: ugly death upon operator that is not Equal or NotEqual for structs
+structBins res1 res2 props operator sr = do
+  first : bools <- mapM (loadProp res1 res2) . zip [0..] $ snd <$> props
+  foldM (binOp andOr) first bools
+  where
+    andOr = case operator of
+      Equal -> AST.And
+      NotEqual -> AST.Or
+    loadProp (op1, _) (op2, _) (index, t) = do
+      realT <- ensureTopNotNamed t
+      llvmtype <- toLLVMType realT
+      comp1 <- (, realT) <$> instr (ExtractValue op1 [index] [], llvmtype)
+      comp2 <- (, realT) <$> instr (ExtractValue op2 [index] [], llvmtype)
+      case realT of
+        StructT innerProps -> structBins comp1 comp2 innerProps operator sr
+        _ -> simpleBins comp1 comp2 realT operator sr
 
 binOp :: (Operand -> Operand -> InstructionMetadata -> Instruction) -> (Operand, Type) -> (Operand, Type) -> FuncGen (Operand, Type)
 binOp operator (op1, t1) (op2, _) = do

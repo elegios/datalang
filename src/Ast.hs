@@ -57,6 +57,7 @@ data Expression = Bin BinOp Expression Expression SourceRange
                 | ExprFunc String [Expression] Type SourceRange
                 | ExprLit Literal SourceRange deriving Show
 -- TODO: Deref
+-- TODO: Bitcast, conversion.
 
 -- Short/Long And/Or means shortcutting/not shortcutting
 data BinOp = Plus | Minus | Times | Divide | Remainder
