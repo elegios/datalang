@@ -234,14 +234,23 @@ generateAssignableExpression (Variable vName sr) = do
     Nothing -> throwError . ErrorString $ "Unknown variable " ++ vName ++ " at " ++ show sr
     Just op -> return op
 
-generateAssignableExpression (MemberAccess expression mName sr) = do
-  (bigOp, bigT) <- generateAssignableExpression expression
-  (index, t) <- findNameIndexInStruct mName bigT sr
-  realT <- ensureTopNotNamed t
-  llvmtype <- T.ptr <$> toLLVMType realT
-  op <- instr (I.GetElementPtr False bigOp [constInt 0, constInt index] [], llvmtype)
-  return (op, realT)
+generateAssignableExpression (MemberAccess expression mName sr) =
+  generateAssignableExpression expression >>= derefPointer >>= bottomGeneration
   where
+    derefPointer (op, t) = do
+      realT <- ensureTopNotNamed t
+      case realT of
+        PointerT innerT -> do
+          llvmtype <- T.ptr <$> toLLVMType innerT
+          innerOp <- instr (Load False op Nothing 0 [], llvmtype)
+          derefPointer (innerOp, innerT)
+        _ -> return (op, realT)
+    bottomGeneration (bottomOp, bottomType) = do
+      (index, t) <- findNameIndexInStruct mName bottomType sr
+      realT <- ensureTopNotNamed t
+      llvmtype <- T.ptr <$> toLLVMType realT
+      op <- instr (I.GetElementPtr False bottomOp [constInt 0, constInt index] [], llvmtype)
+      return (op, realT)
     constInt = ConstantOperand . C.Int 32
 
 generateAssignableExpression (Un Deref expression sr) = do
@@ -265,13 +274,23 @@ generateExpression (Variable vName sr) = do
       i <-  instr (Load False op Nothing 0 [], llvmtype)
       return (i, t)
 
-generateExpression (MemberAccess expression mName sr) = do
-  (bigOp, bigT) <- generateExpression expression
-  (index, t) <- findNameIndexInStruct mName bigT sr
-  realT <- ensureTopNotNamed t
-  llvmtype <- toLLVMType realT
-  ptrOp <- instr (ExtractValue bigOp [fromInteger index] [], llvmtype)
-  return (ptrOp, realT)
+generateExpression (MemberAccess expression mName sr) =
+  generateExpression expression >>= derefPointer >>= bottomGeneration
+  where
+    derefPointer (op, t) = do
+      realT <- ensureTopNotNamed t
+      case realT of
+        PointerT innerT -> do
+          llvmtype <- toLLVMType innerT
+          innerOp <- instr (Load False op Nothing 0 [], llvmtype)
+          derefPointer (innerOp, innerT)
+        _ -> return (op, realT)
+    bottomGeneration (bottomOp, bottomType) = do
+      (index, t) <- findNameIndexInStruct mName bottomType sr
+      realT <- ensureTopNotNamed t
+      llvmtype <- toLLVMType realT
+      ptrOp <- instr (ExtractValue bottomOp [fromInteger index] [], llvmtype)
+      return (ptrOp, realT)
 
 generateExpression (ExprFunc fName expressions t sr) = do
   ops <- sequence $ generateExpression <$> expressions
