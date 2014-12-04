@@ -8,6 +8,9 @@ import Data.Data
 data SourceLoc = SourceLoc deriving Show
 data SourceRange = SourceRange SourceLoc SourceLoc deriving Show
 
+data FuncSig = NormalSig String [Type] [Type]
+             | ExprSig String [Type] Type deriving (Eq, Ord)
+
 data Source = Source
   { functionDefinitions :: M.Map String FuncDef
   , typeDefinitions :: M.Map String TypeDef
@@ -29,6 +32,7 @@ data TypeDef = TypeDef Type [String] SourceRange deriving Show
 -- TODO: Find and prevent infinite recursive structures
 -- TODO: Function types
 -- TODO: Strings
+-- TODO: Algebraic types (as tagged unions?)
 
 data FuncDef = FuncDef
   { inargs :: [String]

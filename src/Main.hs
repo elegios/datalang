@@ -102,8 +102,7 @@ nonRunnablePointers = Source
       , ShallowCopy (Variable "ret" sr) (Un Deref (Variable "p" sr) sr) sr
       ] sr)
     ]
-  , typeDefinitions = Map.fromList
-    []
+  , typeDefinitions = Map.empty
   }
 
 sr :: SourceRange
