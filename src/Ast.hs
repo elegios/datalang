@@ -37,7 +37,7 @@ data TypeDef = TypeDef Type [String] SourceRange deriving Show
 data FuncDef = FuncDef
   { inargs :: [String]
   , outargs :: [String]
-  , statements :: [Statement]
+  , statement :: Statement
   , sourcerange :: SourceRange
   } deriving Show
 

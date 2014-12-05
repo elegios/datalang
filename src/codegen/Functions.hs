@@ -24,16 +24,16 @@ initialFuncState currGenState = FuncState currGenState Nothing Nothing (Ret Noth
 generateFunction :: FuncSig -> CodeGen (Either ErrorMessage AST.Definition)
 generateFunction sig@(NormalSig fName inTs outTs) = do
   currGenState <- get
-  let eit = runFuncGen (initialFuncState currGenState) $ do
+  let generateBody = do
         mFunc <- uses (genState. source . to functionDefinitions) $ M.lookup fName
-        (FuncDef innames outnames stmnts _) <- justErr (ErrorString $ "Function " ++ fName ++ " not found") mFunc
+        (FuncDef innames outnames stmnt _) <- justErr (ErrorString $ "Function " ++ fName ++ " not found") mFunc
 
         (initLocals, params) <- generateInitialFunctionLocals innames inTs outnames outTs
         locals .= initLocals
 
-        generateFunctionBody stmnts
+        generateStatement stmnt
         constructFunctionDeclaration sig params T.void
-  case eit of
+  case runFuncGen (initialFuncState currGenState) generateBody of
     Left e -> return $ Left e
     Right (res, st) -> put (_genState st) >> return (Right res)
 
@@ -42,21 +42,22 @@ generateFunction sig@(ExprSig fName inTs outT) = do
   let initState = FuncState currGenState Nothing Nothing (Br (Name "returnBlock") []) M.empty 0 [] entryBlock
       entryBlock = BasicBlock (Name "entry") [] . Do $ Br (Name "returnBlock") []
       retBlock = BasicBlock (Name "returnBlock") [] . Do $ Ret Nothing []
-  let eit = runFuncGen initState $ do
-        mFunc <- uses (genState . source . to functionDefinitions) $ M.lookup fName
-        (FuncDef innames [outname] stmnts sr) <- justErr (ErrorString $ "Function " ++ fName ++ " not found") mFunc -- TODO: ugly death on incorrect number of outarguments
+      generateBody = do
+        (FuncDef innames [outname] stmnt sr) <- use (genState . source . to functionDefinitions . at fName) -- TODO: ugly death on incorrect number of outarguments
+                                                >>= justErr (ErrorString $ "Function " ++ fName ++ " not found")
 
         (initLocals, params) <- generateInitialFunctionLocals innames inTs [] []
         locals .= initLocals
 
-        generateFunctionBody $ VarInit outname outT sr : stmnts
+        generateStatement $ VarInit outname outT sr
+        generateStatement stmnt
 
         finalizeAndReplaceWith retBlock
         (retOp, _) <- generateExpression (Variable outname undefined)
         currentBlock . blockTerminator .= (Do $ Ret (Just retOp) [])
 
         toLLVMType outT >>= constructFunctionDeclaration sig params
-  case eit of
+  case runFuncGen initState generateBody of
     Left e -> return $ Left e
     Right (res, st) -> put (_genState st) >> return (Right res)
 

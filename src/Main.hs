@@ -4,19 +4,14 @@ import CodeGen
 import Ast
 import qualified Data.Map as Map
 import qualified LLVM.General.AST as AST
-import qualified LLVM.General.AST.Global as G
 import qualified LLVM.General.AST.Type as T
 import qualified LLVM.General.AST.Name as Name
-import qualified LLVM.General.AST.Instruction as I
 import qualified LLVM.General.AST.Operand as O
-import qualified LLVM.General.AST.CallingConvention as CC
 import qualified LLVM.General.AST.Constant as C
 import qualified LLVM.General.Module as M
-import LLVM.General.PrettyPrint
 import LLVM.General.Context
 import LLVM.General.Target
 import LLVM.General.Analysis
-import System.Exit
 import Control.Monad.Except (runExceptT, ExceptT(..))
 
 main = case generate ast requested of
@@ -43,7 +38,7 @@ main = case generate ast requested of
 testAst :: Source
 testAst = Source
   { functionDefinitions = Map.fromList
-    [ ("main", FuncDef [] []
+    [ ("main", FuncDef [] [] (Scope
       [ VarInit "a" U64 sr
       , ShallowCopy (Variable "a" sr) (Bin Plus (Variable "a" sr) (ExprLit (ILit 4 U64) sr) sr) sr
       , VarInit "bo" BoolT sr
@@ -55,7 +50,7 @@ testAst = Source
       , While (Bin Lesser (Variable "a" sr) (ExprLit (ILit 1000000000 U64) sr) sr) (Scope
         [ ShallowCopy (Variable "a" sr) (Bin Plus (Variable "a" sr) (ExprLit (ILit 1 U64) sr) sr) sr
         ] sr) sr
-      ] sr)
+      ] sr) sr)
     ]
   , typeDefinitions = Map.empty
   }
@@ -63,16 +58,16 @@ testAst = Source
 exprAst :: Source
 exprAst = Source
   { functionDefinitions = Map.fromList
-    [ ("main", FuncDef [] ["a"]
+    [ ("main", FuncDef [] ["a"] (Scope
       [ ShallowCopy (Variable "a" sr) (ExprFunc "other" [] I32 sr) sr
       , If (ExprLit (BLit True) sr) (Scope
         [ FuncCall "other" [] [Variable "a" sr] sr
         , Terminator Return sr
         ] sr) Nothing sr
-      ] sr)
+      ] sr) sr)
     , ("other", FuncDef [] ["a"]
-      [ ShallowCopy (Variable "a" sr) (Bin Plus (Variable "a" sr) (ExprLit (ILit 2 I32) sr) sr) sr
-      ] sr)
+      (ShallowCopy (Variable "a" sr) (Bin Plus (Variable "a" sr) (ExprLit (ILit 2 I32) sr) sr) sr)
+      sr)
     ]
   , typeDefinitions = Map.empty
   }
@@ -80,12 +75,12 @@ exprAst = Source
 fancyTypes :: Source
 fancyTypes = Source
   { functionDefinitions = Map.fromList
-    [ ("main", FuncDef [] ["ret"]
+    [ ("main", FuncDef [] ["ret"] (Scope
       [ VarInit "tup" (NamedT "Tuple" [U32, U32]) sr
       , ShallowCopy (MemberAccess (Variable "tup" sr) "a" sr) (ExprLit (ILit 2 U32) sr) sr
       , ShallowCopy (MemberAccess (Variable "tup" sr) "b" sr) (ExprLit (ILit 3 U32) sr) sr
       , ShallowCopy (Variable "ret" sr) (Bin Plus (MemberAccess (Variable "tup" sr) "a" sr) (Bin Times (ExprLit (ILit 10 U32) sr) (MemberAccess (Variable "tup" sr) "b" sr) sr) sr) sr
-      ] sr)
+      ] sr) sr)
     ]
   , typeDefinitions = Map.fromList
     [ ("Tuple", TypeDef (
@@ -96,11 +91,11 @@ fancyTypes = Source
 nonRunnablePointers :: Source
 nonRunnablePointers = Source
   { functionDefinitions = Map.fromList
-    [ ("main", FuncDef [] ["ret"]
+    [ ("main", FuncDef [] ["ret"] (Scope
       [ VarInit "p" (PointerT U32) sr
       , ShallowCopy (Un Deref (Variable "p" sr) sr) (ExprLit (ILit 4 U32) sr) sr
       , ShallowCopy (Variable "ret" sr) (Un Deref (Variable "p" sr) sr) sr
-      ] sr)
+      ] sr) sr)
     ]
   , typeDefinitions = Map.empty
   }

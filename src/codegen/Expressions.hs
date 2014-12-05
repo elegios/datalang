@@ -21,11 +21,8 @@ import qualified LLVM.General.AST.Float as F
 import qualified Data.Map as M
 
 generateAssignableExpression :: Expression -> FuncGen (Operand, Type)
-generateAssignableExpression (Variable vName sr) = do
-  mOp <- use $ locals . at vName
-  case mOp of
-    Nothing -> throwError . ErrorString $ "Unknown variable " ++ vName ++ " at " ++ show sr
-    Just op -> return op
+generateAssignableExpression (Variable vName sr) =
+  use (locals . at vName) >>= justErr (ErrorString $ "Unknown variable " ++ vName ++ " at " ++ show sr)
 
 generateAssignableExpression (MemberAccess expression mName sr) =
   generateAssignableExpression expression >>= derefPointer >>= bottomGeneration
@@ -59,13 +56,10 @@ generateExpression (ExprLit lit sr) = return $ case lit of
   BLit val -> (ConstantOperand . C.Int 1 $ boolean 1 0 val, BoolT)
 
 generateExpression (Variable vName sr) = do
-  mVal <- use $ locals . at vName
-  case mVal of
-    Nothing -> throwError . ErrorString $ "Unknown variable " ++ vName ++ " at " ++ show sr
-    Just (op, t) -> do
-      llvmtype <- toLLVMType t
-      i <-  instr (Load False op Nothing 0 [], llvmtype)
-      return (i, t)
+  (op, t) <- use (locals . at vName) >>= justErr (ErrorString $ "Unknown variable " ++ vName ++ " at " ++ show sr)
+  llvmtype <- toLLVMType t
+  i <- instr (Load False op Nothing 0 [], llvmtype)
+  return (i, t)
 
 generateExpression (MemberAccess expression mName sr) =
   generateExpression expression >>= derefPointer >>= bottomGeneration
@@ -136,63 +130,33 @@ simpleBins :: (Operand, Type) -> (Operand, Type) -> Type -> BinOp -> SourceRange
 simpleBins res1 res2 t operator sr = do
   llvmOperator <- if isNum t
     then case operator of
-      Plus -> return $ if isFloat t then FAdd NoFastMathFlags else Add False False
-      Minus -> return $ if isFloat t then FSub NoFastMathFlags else Sub False False
-      Times -> return $ if isFloat t then FMul NoFastMathFlags else Mul False False
-      Divide -> return $ if isFloat t
-        then FDiv NoFastMathFlags else if isUnsigned t
-          then UDiv False
-          else SDiv False
-      Remainder -> return $ if isFloat t
-        then FRem NoFastMathFlags else if isUnsigned t
-          then URem
-          else SRem
-      Lesser -> return $ if isFloat t
-        then FCmp FP.OLT
-        else ICmp $ if isUnsigned t then ULT else SLT
-      Greater -> return $ if isFloat t
-        then FCmp FP.OGT
-        else ICmp $ if isUnsigned t then UGT else SGT
-      LE -> return $ if isFloat t
-        then FCmp FP.OLE
-        else ICmp $ if isUnsigned t then ULE else SLE
-      GE -> return $ if isFloat t
-        then FCmp FP.OGE
-        else ICmp $ if isUnsigned t then UGE else SGE
-      Equal -> return $ if isFloat t
-        then FCmp FP.OEQ
-        else ICmp IP.EQ
-      NotEqual -> return $ if isFloat t
-        then FCmp FP.ONE
-        else ICmp NE
-      BinAnd -> if isFloat t
-        then throwError . ErrorString $ "BinAnd is not applicable to floats: " ++ show sr
-        else return AST.And
-      BinOr -> if isFloat t
-        then throwError . ErrorString $ "BinOr is not applicable to floats: " ++ show sr
-        else return AST.Or
-      Ast.Xor -> if isFloat t
-        then throwError . ErrorString $ "Xor is not applicable to floats: " ++ show sr
-        else return AST.Xor
-      LShift -> if isFloat t
-        then throwError . ErrorString $ "LShift is not applicable to floats: " ++ show sr
-        else return $ Shl False False
-      LogRShift -> if isFloat t
-        then throwError . ErrorString $ "LogRShift is not applicable to floats: " ++ show sr
-        else return $ LShr False
-      AriRShift -> if isFloat t
-        then throwError . ErrorString $ "AriRShift is not applicable to floats: " ++ show sr
-        else return $ AShr False
+      Equal     -> twoway t (FCmp FP.OEQ) (ICmp IP.EQ)
+      NotEqual  -> twoway t (FCmp FP.ONE) (ICmp NE)
+      Plus      -> twoway t (FAdd NoFastMathFlags) (Add False False)
+      Minus     -> twoway t (FSub NoFastMathFlags) (Sub False False)
+      Times     -> twoway t (FMul NoFastMathFlags) (Mul False False)
+      Divide    -> threeway t (FDiv NoFastMathFlags) (UDiv False) (SDiv False)
+      Remainder -> threeway t (FRem NoFastMathFlags) URem SRem
+      Lesser    -> threeway t (FCmp FP.OLT) (ICmp ULT) (ICmp SLT)
+      Greater   -> threeway t (FCmp FP.OGT) (ICmp UGT) (ICmp SGT)
+      LE        -> threeway t (FCmp FP.OLE) (ICmp ULE) (ICmp SLE)
+      GE        -> threeway t (FCmp FP.OGE) (ICmp UGE) (ICmp SGE)
+      BinAnd    -> nonfloat BinAnd t AST.And
+      BinOr     -> nonfloat BinOr t AST.Or
+      Ast.Xor   -> nonfloat Ast.Xor t AST.Xor
+      LShift    -> nonfloat LShift t $ Shl False False
+      LogRShift -> nonfloat LogRShift t $ LShr False
+      AriRShift -> nonfloat AriRShift t $ AShr False
       _ -> throwError . ErrorString $ show operator ++ " not supported for expressions of type " ++ show t ++ " at " ++ show sr
 
     else case t of -- Non-numerical case
       BoolT -> return $ case operator of
-        Equal -> ICmp IP.EQ
+        Equal    -> ICmp IP.EQ
         NotEqual -> ICmp IP.NE
-        LongAnd -> AST.And
-        LongOr -> AST.Or
+        LongAnd  -> AST.And
+        LongOr   -> AST.Or
       PointerT _ -> return $ case operator of
-        Equal -> ICmp IP.EQ
+        Equal    -> ICmp IP.EQ
         NotEqual -> ICmp IP.NE
   binOp llvmOperator res1 res2
 
@@ -236,8 +200,21 @@ structBins res1 res2 props operator sr = do
         StructT innerProps -> structBins comp1 comp2 innerProps operator sr
         _ -> simpleBins comp1 comp2 realT operator sr
 
-binOp :: (Operand -> Operand -> InstructionMetadata -> Instruction) -> (Operand, Type) -> (Operand, Type) -> FuncGen (Operand, Type)
+binOp :: LLVMOperator -> (Operand, Type) -> (Operand, Type) -> FuncGen (Operand, Type)
 binOp operator (op1, t1) (op2, _) = do
   llvmt <- toLLVMType t1
   res <- instr (operator op1 op2 [], llvmt)
   return (res, t1)
+
+type LLVMOperator = Operand -> Operand -> InstructionMetadata -> Instruction
+
+twoway :: Type -> LLVMOperator -> LLVMOperator -> FuncGen LLVMOperator
+twoway t f i = return $ if isFloat t then f else i
+
+threeway :: Type -> LLVMOperator -> LLVMOperator -> LLVMOperator -> FuncGen LLVMOperator
+threeway t f u i = return $ if isFloat t then f else if isUnsigned t then u else i
+
+nonfloat :: BinOp -> Type -> LLVMOperator -> FuncGen LLVMOperator
+nonfloat op t i = if isFloat t
+  then throwError . ErrorString $ show op ++ " is not applicable to floats "
+  else return i
