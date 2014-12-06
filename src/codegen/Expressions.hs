@@ -20,91 +20,67 @@ import qualified LLVM.General.AST as AST
 import qualified LLVM.General.AST.Float as F
 import qualified Data.Map as M
 
-generateAssignableExpression :: Expression -> FuncGen (Operand, Type)
-generateAssignableExpression (Variable vName sr) =
+generateExpression :: Expression -> FuncGen FuncGenOperand
+generateExpression (Variable vName sr) =
   use (locals . at vName) >>= justErr (ErrorString $ "Unknown variable " ++ vName ++ " at " ++ show sr)
-
-generateAssignableExpression (MemberAccess expression mName sr) =
-  generateAssignableExpression expression >>= derefPointer >>= bottomGeneration
-  where
-    derefPointer (op, t) = do
-      realT <- ensureTopNotNamed t
-      case realT of
-        PointerT innerT -> do
-          llvmtype <- T.ptr <$> toLLVMType innerT
-          innerOp <- instr (Load False op Nothing 0 [], llvmtype)
-          derefPointer (innerOp, innerT)
-        _ -> return (op, realT)
-    bottomGeneration (bottomOp, bottomType) = do
-      (index, t) <- findNameIndexInStruct mName bottomType sr
-      realT <- ensureTopNotNamed t
-      llvmtype <- T.ptr <$> toLLVMType realT
-      op <- instr (I.GetElementPtr False bottomOp [constInt 0, constInt index] [], llvmtype)
-      return (op, realT)
-    constInt = ConstantOperand . C.Int 32
-
-generateAssignableExpression (Un Deref expression sr) = do
-  (expOp, PointerT t) <- generateExpression expression
-  realT <- ensureTopNotNamed t
-  return (expOp, realT)
-
-generateExpression :: Expression -> FuncGen (Operand, Type)
-generateExpression (ExprLit lit sr) = return $ case lit of
-  ILit val t -> (ConstantOperand $ C.Int size val, t)
-    where size = fromJust $ M.lookup t typeSizeMap
-  FLit val t -> (ConstantOperand . C.Float $ F.Double val, t)
-  BLit val -> (ConstantOperand . C.Int 1 $ boolean 1 0 val, BoolT)
-
-generateExpression (Variable vName sr) = do
-  (op, t) <- use (locals . at vName) >>= justErr (ErrorString $ "Unknown variable " ++ vName ++ " at " ++ show sr)
-  llvmtype <- toLLVMType t
-  i <- instr (Load False op Nothing 0 [], llvmtype)
-  return (i, t)
 
 generateExpression (MemberAccess expression mName sr) =
   generateExpression expression >>= derefPointer >>= bottomGeneration
   where
-    derefPointer (op, t) = do
+    derefPointer (op, t, mutable) = do
       realT <- ensureTopNotNamed t
       case realT of
         PointerT innerT -> do
-          llvmtype <- toLLVMType innerT
+          llvmtype <- toLLVMType mutable innerT
           innerOp <- instr (Load False op Nothing 0 [], llvmtype)
-          derefPointer (innerOp, innerT)
-        _ -> return (op, realT)
-    bottomGeneration (bottomOp, bottomType) = do
+          derefPointer (innerOp, innerT, mutable)
+        _ -> return (op, realT, mutable)
+    bottomGeneration (bottomOp, bottomType, mutable) = do
       (index, t) <- findNameIndexInStruct mName bottomType sr
       realT <- ensureTopNotNamed t
-      llvmtype <- toLLVMType realT
-      ptrOp <- instr (ExtractValue bottomOp [fromInteger index] [], llvmtype)
-      return (ptrOp, realT)
+      llvmtype <- toLLVMType mutable realT
+      op <- instr (accessOp bottomOp index mutable, llvmtype)
+      return (op, realT, mutable)
+    accessOp bottomOp index mutable = if mutable
+      then I.GetElementPtr False bottomOp [constInt 0, constInt index] []
+      else ExtractValue bottomOp [fromInteger index] []
+    constInt = ConstantOperand . C.Int 32
+
+generateExpression (Un Deref expression sr) = do
+  (expOp, PointerT t, mutable) <- generateExpression expression
+  realT <- ensureTopNotNamed t
+  llvmtype <- toLLVMType mutable realT
+  op <- instr (Load False expOp Nothing 0 [], llvmtype)
+  return (op, realT, mutable)
+
+generateExpression (ExprLit lit sr) = return $ case lit of
+  ILit val t -> (ConstantOperand $ C.Int size val, t, False)
+    where size = fromJust $ M.lookup t typeSizeMap
+  FLit val t -> (ConstantOperand . C.Float $ F.Double val, t, False)
+  BLit val -> (ConstantOperand . C.Int 1 $ boolean 1 0 val, BoolT, False)
 
 generateExpression (ExprFunc fName expressions t sr) = do
-  ops <- mapM generateExpression expressions
-  funcOp <- requestFunction $ ExprSig fName (snd <$> ops) t
-  llvmtype <- toLLVMType t
-  retOp <- instr (Call False CC.C [] funcOp (zip (fst <$> ops) $ repeat []) [] [], llvmtype)
-  return (retOp, t)
+  ops <- mapM (generateExpression >=> toImmutable) expressions
+  retty <- ensureTopNotNamed t
+  funcOp <- requestFunction $ ExprSig fName (opType <$> ops) retty
+  llvmtype <- toLLVMType False t
+  retOp <- instr (Call False CC.C [] funcOp (zip (opOp <$> ops) $ repeat []) [] [], llvmtype)
+  return (retOp, t, False)
 
--- TODO: ugly deaths in generateExpression for UnOps
-generateExpression (Un Deref expression sr) = do
-  (expOp, PointerT t) <- generateExpression expression
-  realT <- ensureTopNotNamed t
-  llvmtype <- toLLVMType realT
-  res <- instr (Load False expOp Nothing 0 [], llvmtype)
-  return (res, realT)
-generateExpression (Un AddressOf expression sr) =
-  (_2 %~ PointerT) <$> generateAssignableExpression expression
+generateExpression (Un AddressOf expression sr) = do
+  (op, t, True) <- generateExpression expression -- TODO: ugly death on expression not being mutable
+  return (op, PointerT t, False)
+
 generateExpression (Un operator expression sr) = do
-  (expOp, t) <- generateExpression expression
-  llvmtype <- toLLVMType t
-  res <- instr . (, llvmtype) $ case operator of
+  (expOp, t, _) <- generateExpression expression >>= toImmutable
+  llvmtype <- toLLVMType False t
+  res <- instr . (, llvmtype) . (\f -> f expOp []) $ case operator of
     AriNegate -> if isFloat t
-      then FSub NoFastMathFlags (zero t) expOp []
-      else Sub False False (zero t) expOp []
-    Not -> AST.Xor (one t) expOp []
-    BinNegate -> AST.Xor (one t) expOp []
-  return (res, t)
+      then FSub NoFastMathFlags (zero t)
+      else Sub False False (zero t)
+    Not -> AST.Xor (one t)
+    BinNegate -> AST.Xor (one t)
+  return (res, t, False)
   where
     zero t = if isFloat t
       then ConstantOperand . C.Float $ F.Double 0
@@ -114,19 +90,19 @@ generateExpression (Un operator expression sr) = do
       where size = fromJust $ M.lookup t typeSizeMap
 
 generateExpression (Bin operator exp1 exp2 sr) = do
-  res1@(_, t1) <- generateExpression exp1
+  res1@(_, t1, _) <- generateExpression exp1 >>= toImmutable
   case (t1, operator) of
     (StructT props, _) -> do
-      res2 <- generateExpression exp2
+      res2 <- generateExpression exp2 >>= toImmutable
       structBins res1 res2 props operator sr
     (_, ShortAnd) -> shortcuts res1 exp2 ShortAnd sr
     (_, ShortOr) -> shortcuts res1 exp2 ShortOr sr
     _ -> do
-      res2@(_, t2) <- generateExpression exp2
+      res2@(_, t2, _) <- generateExpression exp2 >>= toImmutable
       when (t1 /= t2) . throwError . ErrorString $ "The expressions around " ++ show operator ++ " at " ++ show sr ++ " have different types (" ++ show t1 ++ " != " ++ show t2 ++ ")"
       simpleBins res1 res2 t1 operator sr
 
-simpleBins :: (Operand, Type) -> (Operand, Type) -> Type -> BinOp -> SourceRange -> FuncGen (Operand, Type)
+simpleBins :: FuncGenOperand -> FuncGenOperand -> Type -> BinOp -> SourceRange -> FuncGen FuncGenOperand
 simpleBins res1 res2 t operator sr = do
   llvmOperator <- if isNum t
     then case operator of
@@ -160,8 +136,8 @@ simpleBins res1 res2 t operator sr = do
         NotEqual -> ICmp IP.NE
   binOp llvmOperator res1 res2
 
-shortcuts :: (Operand, Type) -> Expression -> BinOp -> SourceRange -> FuncGen (Operand, Type)
-shortcuts (op1, _) exp2 operator sr = do
+shortcuts :: FuncGenOperand -> Expression -> BinOp -> SourceRange -> FuncGen FuncGenOperand
+shortcuts (op1, _, _) exp2 operator sr = do
   block2 <- newBlock
   contBlock <- newBlock
   prevName <- use $ currentBlock . blockName
@@ -175,14 +151,14 @@ shortcuts (op1, _) exp2 operator sr = do
   currentBlock . blockTerminator .= (Do $ CondBr op1 trueName falseName [])
 
   finalizeAndReplaceWith block2
-  (op2, _) <- generateExpression exp2
+  (op2, _, _) <- generateExpression exp2 >>= toImmutable
   currentBlock . blockTerminator .= (Do $ Br contName [])
 
   finalizeAndReplaceWith $ block2 & blockTerminator .~ prevTerminator
   op <- instr (Phi T.i1 [(ConstantOperand $ C.Int 1 shortResult, prevName), (op2, name2)] [], T.i1)
-  return (op, BoolT)
+  return (op, BoolT, False)
 
-structBins :: (Operand, Type) -> (Operand, Type) -> [(String, Type)] -> BinOp -> SourceRange -> FuncGen (Operand, Type)
+structBins :: FuncGenOperand -> FuncGenOperand -> [(String, Type)] -> BinOp -> SourceRange -> FuncGen FuncGenOperand
 -- TODO: ugly death upon operator that is not Equal or NotEqual for structs
 structBins res1 res2 props operator sr = do
   first : bools <- mapM (loadProp res1 res2) . zip [0..] $ snd <$> props
@@ -191,30 +167,36 @@ structBins res1 res2 props operator sr = do
     andOr = case operator of
       Equal -> AST.And
       NotEqual -> AST.Or
-    loadProp (op1, _) (op2, _) (index, t) = do
+    loadProp (op1, _, _) (op2, _, _) (index, t) = do
       realT <- ensureTopNotNamed t
-      llvmtype <- toLLVMType realT
-      comp1 <- (, realT) <$> instr (ExtractValue op1 [index] [], llvmtype)
-      comp2 <- (, realT) <$> instr (ExtractValue op2 [index] [], llvmtype)
+      llvmtype <- toLLVMType False realT
+      comp1 <- (, realT, False) <$> instr (ExtractValue op1 [index] [], llvmtype)
+      comp2 <- (, realT, False) <$> instr (ExtractValue op2 [index] [], llvmtype)
       case realT of
         StructT innerProps -> structBins comp1 comp2 innerProps operator sr
         _ -> simpleBins comp1 comp2 realT operator sr
 
-binOp :: LLVMOperator -> (Operand, Type) -> (Operand, Type) -> FuncGen (Operand, Type)
-binOp operator (op1, t1) (op2, _) = do
-  llvmt <- toLLVMType t1
+binOp :: LLVMOperator -> FuncGenOperand -> FuncGenOperand -> FuncGen FuncGenOperand
+binOp operator (op1, t1, _) (op2, _, _) = do
+  llvmt <- toLLVMType False t1
   res <- instr (operator op1 op2 [], llvmt)
-  return (res, t1)
+  return (res, t1, False)
 
 type LLVMOperator = Operand -> Operand -> InstructionMetadata -> Instruction
 
-twoway :: Type -> LLVMOperator -> LLVMOperator -> FuncGen LLVMOperator
+twoway :: Type -> a -> a -> FuncGen a
 twoway t f i = return $ if isFloat t then f else i
 
-threeway :: Type -> LLVMOperator -> LLVMOperator -> LLVMOperator -> FuncGen LLVMOperator
+threeway :: Type -> a -> a -> a -> FuncGen a
 threeway t f u i = return $ if isFloat t then f else if isUnsigned t then u else i
 
-nonfloat :: BinOp -> Type -> LLVMOperator -> FuncGen LLVMOperator
+nonfloat :: BinOp -> Type -> a -> FuncGen a
 nonfloat op t i = if isFloat t
   then throwError . ErrorString $ show op ++ " is not applicable to floats "
   else return i
+
+toImmutable :: FuncGenOperand -> FuncGen FuncGenOperand
+toImmutable res@(_, _, False) = return res
+toImmutable (op, t, True) = do
+  llvmtype <- toLLVMType False t
+  (, t, False) <$> instr (Load False op Nothing 0 [], llvmtype)

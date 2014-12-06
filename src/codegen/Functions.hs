@@ -1,3 +1,5 @@
+{-# LANGUAGE TupleSections #-}
+
 module CodeGen.Functions where
 
 import Ast
@@ -49,29 +51,29 @@ generateFunction sig@(ExprSig fName inTs outT) = do
         (initLocals, params) <- generateInitialFunctionLocals innames inTs [] []
         locals .= initLocals
 
-        generateStatement $ VarInit outname outT sr
+        generateStatement $ VarInit outname outT True sr
         generateStatement stmnt
 
         finalizeAndReplaceWith retBlock
-        (retOp, _) <- generateExpression (Variable outname undefined)
+        (retOp, _, _) <- generateExpression (Variable outname undefined) >>= toImmutable
         currentBlock . blockTerminator .= (Do $ Ret (Just retOp) [])
 
-        toLLVMType outT >>= constructFunctionDeclaration sig params
+        toLLVMType False outT >>= constructFunctionDeclaration sig params
   case runFuncGen initState generateBody of
     Left e -> return $ Left e
     Right (res, st) -> put (_genState st) >> return (Right res)
 
-generateInitialFunctionLocals :: [String] -> [Type] -> [String] -> [Type] -> FuncGen (M.Map String (Operand, Type), [Parameter])
+generateInitialFunctionLocals :: [String] -> [Type] -> [String] -> [Type] -> FuncGen (M.Map String FuncGenOperand, [Parameter])
 generateInitialFunctionLocals innames inTs outnames outTs = do
   llvmparams <- toFunctionParams inTs outTs
   let names = innames ++ outnames
-      types = inTs ++ outTs
+      types = map (\t -> (, t, False)) inTs ++ map (\t -> (, t, True)) outTs
       llvmnames = Name <$> names
 
       params = zipWith3 Parameter llvmparams llvmnames (repeat [])
 
       paramLocals = zipWith LocalReference llvmparams llvmnames
-      initialLocals = M.fromList . zip (innames ++ outnames) . zip paramLocals $ types
+      initialLocals = M.fromList . zip (innames ++ outnames) . zipWith ($) types $ paramLocals 
   return (initialLocals, params)
 
 constructFunctionDeclaration :: FuncSig -> [Parameter] -> T.Type -> FuncGen AST.Definition

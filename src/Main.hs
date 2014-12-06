@@ -3,6 +3,7 @@ module Main where
 import CodeGen
 import Ast
 import qualified Data.Map as Map
+import LLVM.General.PrettyPrint
 import qualified LLVM.General.AST as AST
 import qualified LLVM.General.AST.Type as T
 import qualified LLVM.General.AST.Name as Name
@@ -16,7 +17,7 @@ import Control.Monad.Except (runExceptT, ExceptT(..))
 
 main = case generate ast requested of
   Left errs -> putStrLn "errors: " >> print errs
-  Right mod -> asGeneralModule mod (\m -> do
+  Right mod -> (putStrLn $ showPretty mod) >> asGeneralModule mod (\m -> do
     verifyResult <- runExceptT $ verify m
     case verifyResult of
       Left mess -> putStrLn $ "Verify error: " ++ mess
@@ -26,10 +27,10 @@ main = case generate ast requested of
         writeObjectFile m
         )
   where
-    -- (requestedSig, ast, normal) = (NormalSig "main" [] [], testAst, False)
+    (requestedSig, ast, normal) = (NormalSig "main" [] [], testAst, False)
     -- (requestedSig, ast, normal) = (ExprSig "main" [] I32, exprAst, True)
     -- (requestedSig, ast, normal) = (ExprSig "main" [] I32, fancyTypes, True)
-    (requestedSig, ast, normal) = (ExprSig "main" [] I32, nonRunnablePointers, True)
+    -- (requestedSig, ast, normal) = (ExprSig "main" [] I32, nonRunnablePointers, True)
     requested = Map.fromList [(requestedSig, Right . O.ConstantOperand . C.GlobalReference llvmt $ Name.Name "main")]
     llvmt = if normal
       then T.FunctionType T.i32 [] False
@@ -39,9 +40,9 @@ testAst :: Source
 testAst = Source
   { functionDefinitions = Map.fromList
     [ ("main", FuncDef [] [] (Scope
-      [ VarInit "a" U64 sr
+      [ VarInit "a" U64 True sr
       , ShallowCopy (Variable "a" sr) (Bin Plus (Variable "a" sr) (ExprLit (ILit 4 U64) sr) sr) sr
-      , VarInit "bo" BoolT sr
+      , VarInit "bo" BoolT True sr
       , ShallowCopy (Variable "bo" sr) (ExprLit (BLit True) sr) sr
       , ShallowCopy (Variable "bo" sr) (ExprLit (BLit False) sr) sr
       , While (Bin Lesser (Variable "a" sr) (ExprLit (ILit 10 U64) sr) sr) (Scope
@@ -76,7 +77,7 @@ fancyTypes :: Source
 fancyTypes = Source
   { functionDefinitions = Map.fromList
     [ ("main", FuncDef [] ["ret"] (Scope
-      [ VarInit "tup" (NamedT "Tuple" [U32, U32]) sr
+      [ VarInit "tup" (NamedT "Tuple" [U32, U32]) True sr
       , ShallowCopy (MemberAccess (Variable "tup" sr) "a" sr) (ExprLit (ILit 2 U32) sr) sr
       , ShallowCopy (MemberAccess (Variable "tup" sr) "b" sr) (ExprLit (ILit 3 U32) sr) sr
       , ShallowCopy (Variable "ret" sr) (Bin Plus (MemberAccess (Variable "tup" sr) "a" sr) (Bin Times (ExprLit (ILit 10 U32) sr) (MemberAccess (Variable "tup" sr) "b" sr) sr) sr) sr
@@ -92,7 +93,7 @@ nonRunnablePointers :: Source
 nonRunnablePointers = Source
   { functionDefinitions = Map.fromList
     [ ("main", FuncDef [] ["ret"] (Scope
-      [ VarInit "p" (PointerT U32) sr
+      [ VarInit "p" (PointerT U32) True sr
       , ShallowCopy (Un Deref (Variable "p" sr) sr) (ExprLit (ILit 4 U32) sr) sr
       , ShallowCopy (Variable "ret" sr) (Un Deref (Variable "p" sr) sr) sr
       ] sr) sr)

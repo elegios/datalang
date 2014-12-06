@@ -47,7 +47,7 @@ data Statement = FuncCall String [Expression] [Expression] SourceRange
                | While Expression Statement SourceRange
                | Scope [Statement] SourceRange
                | Terminator TerminatorType SourceRange
-               | VarInit String Type SourceRange deriving Show
+               | VarInit String Type Bool SourceRange deriving Show
 -- TODO: For, possibly for-each
 -- TODO: Switch, match or pattern match
 -- TODO: Zero-initialization
@@ -61,7 +61,6 @@ data Expression = Bin BinOp Expression Expression SourceRange
                 | Variable String SourceRange
                 | ExprFunc String [Expression] Type SourceRange
                 | ExprLit Literal SourceRange deriving Show
--- TODO: Deref
 -- TODO: Bitcast, conversion.
 
 -- Short/Long And/Or means shortcutting/not shortcutting
