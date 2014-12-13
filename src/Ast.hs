@@ -25,6 +25,7 @@ data Type = I8 | I16 | I32 | I64
           | NamedT String [Type]
           | BoolT
           | PointerT Type
+          | Memorychunk Type Bool Type
           | StructT [(String, Type)] deriving (Show, Ord, Eq, Data, Typeable) -- TODO: Manual definition using uniplate.direct for speed
 data TypeDef = TypeDef Type [String] SourceRange deriving Show
 -- TODO: More fancy pointers
@@ -58,6 +59,7 @@ data TerminatorType = Return | Break | Continue deriving (Show, Eq)
 data Expression = Bin BinOp Expression Expression SourceRange
                 | Un UnOp Expression SourceRange
                 | MemberAccess Expression String SourceRange
+                | Subscript Expression Expression SourceRange
                 | Variable String SourceRange
                 | ExprFunc String [Expression] Type SourceRange
                 | ExprLit Literal SourceRange deriving Show

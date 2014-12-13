@@ -36,7 +36,7 @@ generateExpression (MemberAccess expression mName sr) =
           derefPointer (innerOp, innerT, mutable)
         _ -> return (op, realT, mutable)
     bottomGeneration (bottomOp, bottomType, mutable) = do
-      (index, t) <- findNameIndexInStruct mName bottomType sr
+      (index, t) <- findMemberIndex mName bottomType sr
       realT <- ensureTopNotNamed t
       llvmtype <- toLLVMType mutable realT
       op <- instr (accessOp bottomOp index mutable, llvmtype)
@@ -45,6 +45,16 @@ generateExpression (MemberAccess expression mName sr) =
       then I.GetElementPtr False bottomOp [constInt 0, constInt index] []
       else ExtractValue bottomOp [fromInteger index] []
     constInt = ConstantOperand . C.Int 32
+
+-- TODO: ugly death in subscript generation if wrong type
+generateExpression (Subscript chunk index sr) = do
+  c@(_, Memorychunk _ hasCap innerT, mutable) <- generateExpression chunk
+  (chunkOp, _, _) <- toImmutable c
+  llvmtype <- toLLVMType True innerT
+  ptrOp <- instr (ExtractValue chunkOp [boolean 2 1 hasCap] [], llvmtype)
+  (indexOp, _, _) <- generateExpression index >>= toImmutable
+  elementOp <- instr (I.GetElementPtr False ptrOp [indexOp] [], llvmtype)
+  boolean return toImmutable mutable (elementOp, innerT, True)
 
 generateExpression (Un Deref expression sr) = do
   (expOp, PointerT t, mutable) <- generateExpression expression

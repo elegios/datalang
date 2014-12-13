@@ -1,3 +1,5 @@
+{-# LANGUAGE TupleSections #-}
+
 module CodeGen.FuncGen where
 
 import Ast
@@ -129,11 +131,15 @@ toLLVMType mutable nt = ensureTopNotNamed nt >>= \t -> case t of
     Just llvmtype -> return llvmtype
     Nothing -> throwError . ErrorString $ "Missed a case in the compiler, there is a type that cannot be converted to an LLVM type: " ++ show t
 
-findNameIndexInStruct :: String -> Type -> SourceRange -> FuncGen (Integer, Type)
-findNameIndexInStruct mName (StructT fields) sr = case find (\(_, (n, _)) -> n == mName) $ zip [0..] fields of
+findMemberIndex :: String -> Type -> SourceRange -> FuncGen (Integer, Type)
+findMemberIndex mName (StructT fields) sr = case find (\(_, (n, _)) -> n == mName) $ zip [0..] fields of
   Just (i, (_, t)) -> return (i, t)
   Nothing -> throwError . ErrorString $ "Unknown member field " ++ mName ++ " in struct at " ++ show sr
-findNameIndexInStruct _ _ sr = throwError . ErrorString $ "Attempt to access member field of non-struct type at " ++ show sr
+-- TODO: ugly death in findMemberIndex on strange memorychunks
+findMemberIndex mName (Memorychunk iType _ _) _ = return . (, iType) $ case mName of
+  "len" -> 0
+  "cap" -> 1
+findMemberIndex _ _ sr = throwError . ErrorString $ "Attempt to access member field of non-struct type at " ++ show sr
 
 opOp :: FuncGenOperand -> Operand
 opOp (a, _, _) = a
