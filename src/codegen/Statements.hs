@@ -1,3 +1,5 @@
+{-# LANGUAGE TupleSections #-}
+
 module CodeGen.Statements where
 
 import Ast
@@ -5,6 +7,7 @@ import CodeGen.Basics
 import CodeGen.FuncGen
 import CodeGen.Expressions
 import Data.Functor ((<$>))
+import Control.Applicative ((<*>))
 import Control.Lens hiding (op, index, parts, transform)
 import Control.Monad
 import LLVM.General.AST.Instruction as I hiding (condition, index)
@@ -18,17 +21,29 @@ generateStatement (VarInit vName t True _) = do
   op <- instr (Alloca llvmtypeToAllocate Nothing 0 [], T.ptr llvmtypeToAllocate)
   locals . at vName ?= (op, realT, True)
 
+generateStatement (Defer stmnt _) = do
+  defers . defersAll %= (stmnt :)
+  defers . defersLoop %= (stmnt :)
+  defers . defersScope %= (stmnt :)
+
 generateStatement (Terminator t sr) = do
-  term <- case t of
-    Return -> use retTerminator
+  (term, deferred) <- case t of
+    Return -> (,) <$> use retTerminator <*> use (defers . defersAll)
     _ -> do
       target <- use (boolean breakTarget continueTarget $ t == Break) >>= justErr (ErrorString $ "Cannot break or continue at " ++ show sr ++ ", no loop.")
-      return $ Br target []
+      (Br target [], ) <$> use (defers . defersLoop)
+  mapM_ generateStatement deferred
   currentBlock . blockTerminator .= Do term
 
 generateStatement (Scope inner _) = do
   prevLocals <- use locals
+  prevDefers <- use defers
+  defers . defersScope .= []
+
   mapM_ generateStatement inner
+
+  use (defers . defersScope) >>= mapM_ generateStatement
+  defers .= prevDefers
   locals .= prevLocals
 
 generateStatement (ShallowCopy assignee expression sr) = do
@@ -43,6 +58,9 @@ generateStatement (FuncCall fName ins outs sr) = do
   uinstr $ Call False CC.C [] funcOp (zip (map opOp $ inOps ++ outOps) $ repeat []) [] []
 
 generateStatement (While condition stmnt sr) = do
+  prevDefers <- use defers
+  defers . defersLoop .= []
+
   condBlock <- newBlock
   bodyBlock <- newBlock
   nextBlock <- newBlock
@@ -64,6 +82,9 @@ generateStatement (While condition stmnt sr) = do
   finalizeAndReplaceWith $ nextBlock & blockTerminator .~ prevTerminator
   breakTarget .= prevBreakTarget
   continueTarget .= prevContinueTarget
+
+  use (defers . defersLoop) >>= mapM_ generateStatement
+  defers .= prevDefers
 
 generateStatement (If condition thenStmnt mElseStmnt sr) = do
   thenBlock <- newBlock

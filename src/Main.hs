@@ -27,10 +27,11 @@ main = case generate ast requested of
         writeObjectFile m
         )
   where
-    (requestedSig, ast, normal) = (NormalSig "main" [] [], testAst, False)
+    -- (requestedSig, ast, normal) = (NormalSig "main" [] [], testAst, False)
     -- (requestedSig, ast, normal) = (ExprSig "main" [] I32, exprAst, True)
     -- (requestedSig, ast, normal) = (ExprSig "main" [] I32, fancyTypes, True)
     -- (requestedSig, ast, normal) = (ExprSig "main" [] I32, nonRunnablePointers, True)
+    (requestedSig, ast, normal) = (ExprSig "main" [] I32, deferTest, True)
     requested = Map.fromList [(requestedSig, Right . O.ConstantOperand . C.GlobalReference llvmt $ Name.Name "main")]
     llvmt = if normal
       then T.FunctionType T.i32 [] False
@@ -96,6 +97,25 @@ nonRunnablePointers = Source
       [ VarInit "p" (PointerT U32) True sr
       , ShallowCopy (Un Deref (Variable "p" sr) sr) (ExprLit (ILit 4 U32) sr) sr
       , ShallowCopy (Variable "ret" sr) (Un Deref (Variable "p" sr) sr) sr
+      ] sr) sr)
+    ]
+  , typeDefinitions = Map.empty
+  }
+
+deferTest :: Source
+deferTest = Source
+  { functionDefinitions = Map.fromList
+    [ ("main", FuncDef [] ["ret"] (Scope
+      [ ShallowCopy (Variable "ret" sr) (ExprLit (ILit 0 I32) sr) sr
+      , VarInit "extra" I32 True sr
+      , ShallowCopy (Variable "extra" sr) (ExprLit (ILit 0 I32) sr) sr
+      , Defer (ShallowCopy (Variable "ret" sr) (Bin Minus (Variable "ret" sr) (ExprLit (ILit 1 I32) sr) sr) sr) sr
+      , While (Bin Lesser (Variable "ret" sr) (ExprLit (ILit 4 I32) sr) sr) (Scope
+        [ Defer (ShallowCopy (Variable "ret" sr) (Bin Plus (Variable "ret" sr) (ExprLit (ILit 1 I32) sr) sr) sr) sr
+        , If (Bin Equal (Variable "ret" sr) (ExprLit (ILit 2 I32) sr) sr) (Terminator Continue sr) Nothing sr
+        , ShallowCopy (Variable "extra" sr) (Bin Plus (Variable "extra" sr) (Variable "ret" sr) sr) sr
+        ] sr) sr
+      , ShallowCopy (Variable "ret" sr) (Bin Plus (Variable "ret" sr) (Bin Times (Variable "extra" sr) (ExprLit (ILit 10 I32) sr) sr) sr) sr
       ] sr) sr)
     ]
   , typeDefinitions = Map.empty

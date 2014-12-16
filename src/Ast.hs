@@ -29,7 +29,6 @@ data Type = I8 | I16 | I32 | I64
           | StructT [(String, Type)] deriving (Show, Ord, Eq, Data, Typeable) -- TODO: Manual definition using uniplate.direct for speed
 data TypeDef = TypeDef Type [String] SourceRange deriving Show
 -- TODO: More fancy pointers
--- TODO: Memorychunks
 -- TODO: Find and prevent infinite recursive structures
 -- TODO: Function types
 -- TODO: Strings
@@ -43,6 +42,7 @@ data FuncDef = FuncDef
   } deriving Show
 
 data Statement = FuncCall String [Expression] [Expression] SourceRange
+               | Defer Statement SourceRange
                | ShallowCopy Expression Expression SourceRange
                | If Expression Statement (Maybe Statement) SourceRange
                | While Expression Statement SourceRange
@@ -52,7 +52,6 @@ data Statement = FuncCall String [Expression] [Expression] SourceRange
 -- TODO: For, possibly for-each
 -- TODO: Switch, match or pattern match
 -- TODO: Zero-initialization
--- TODO: Defer
 
 data TerminatorType = Return | Break | Continue deriving (Show, Eq)
 

@@ -30,6 +30,13 @@ data FuncState = FuncState
   , _nextFresh :: Word
   , _finalizedBlocks :: [BasicBlock]
   , _currentBlock :: BasicBlock
+  , _defers :: Defers
+  }
+
+data Defers = Defers
+  { _defersAll :: [Statement]
+  , _defersLoop :: [Statement]
+  , _defersScope :: [Statement]
   }
 
 type FuncGen a = StateT FuncState (ExceptT ErrorMessage Identity) a
@@ -150,6 +157,8 @@ opMutable (_, _, a) = a
 
 -- Lenses
 
+-- FuncState
+
 breakTarget :: Functor f => (Maybe Name -> f (Maybe Name)) -> FuncState -> f FuncState
 breakTarget inj g = (\bt -> g { _breakTarget = bt }) <$> inj (_breakTarget g)
 {-# INLINE breakTarget #-}
@@ -181,3 +190,21 @@ currentBlock inj g = (\cb -> g { _currentBlock = cb }) <$> inj (_currentBlock g)
 nextFresh :: Functor f => (Word -> f Word) -> FuncState -> f FuncState
 nextFresh inj g = (\nf -> g { _nextFresh = nf }) <$> inj (_nextFresh g)
 {-# INLINE nextFresh #-}
+
+defers :: Functor f => (Defers -> f Defers) -> FuncState -> f FuncState
+defers inj g = (\nf -> g { _defers = nf }) <$> inj (_defers g)
+{-# INLINE defers #-}
+
+-- Defers
+
+defersAll :: Functor f => ([Statement] -> f [Statement]) -> Defers -> f Defers
+defersAll inj g = (\nf -> g { _defersAll = nf }) <$> inj (_defersAll g)
+{-# INLINE defersAll #-}
+
+defersLoop :: Functor f => ([Statement] -> f [Statement]) -> Defers -> f Defers
+defersLoop inj g = (\nf -> g { _defersLoop = nf }) <$> inj (_defersLoop g)
+{-# INLINE defersLoop #-}
+
+defersScope :: Functor f => ([Statement] -> f [Statement]) -> Defers -> f Defers
+defersScope inj g = (\nf -> g { _defersScope = nf }) <$> inj (_defersScope g)
+{-# INLINE defersScope #-}
