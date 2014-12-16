@@ -55,7 +55,7 @@ testAst = Source
       ] sr) sr)
     ]
   , typeDefinitions = Map.empty
-  }
+  } -- Does not return anything, so probably 0
 
 exprAst :: Source
 exprAst = Source
@@ -72,7 +72,7 @@ exprAst = Source
       sr)
     ]
   , typeDefinitions = Map.empty
-  }
+  } -- Should (probably, use of uninitialized variable) return 4
 
 fancyTypes :: Source
 fancyTypes = Source
@@ -88,7 +88,7 @@ fancyTypes = Source
     [ ("Tuple", TypeDef (
       StructT [("a", NamedT "a" []), ("b", NamedT "b" [])]
       ) ["a", "b"] sr)]
-  }
+  } -- Should return 32
 
 nonRunnablePointers :: Source
 nonRunnablePointers = Source
@@ -100,7 +100,7 @@ nonRunnablePointers = Source
       ] sr) sr)
     ]
   , typeDefinitions = Map.empty
-  }
+  } -- Seg fault
 
 deferTest :: Source
 deferTest = Source
@@ -119,7 +119,7 @@ deferTest = Source
       ] sr) sr)
     ]
   , typeDefinitions = Map.empty
-  }
+  } -- Should return 43
 
 sr :: SourceRange
 sr = SourceRange SourceLoc SourceLoc
