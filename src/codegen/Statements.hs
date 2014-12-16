@@ -46,18 +46,18 @@ generateStatement (Scope inner _) = do
   defers .= prevDefers
   locals .= prevLocals
 
-generateStatement (ShallowCopy assignee expression sr) = do
+generateStatement (ShallowCopy assignee expression _) = do
   (assOp, _, True) <- generateExpression assignee
   (expOp, _, _) <- generateExpression expression >>= toImmutable
   uinstr $ Store False assOp expOp Nothing 0 []
 
-generateStatement (FuncCall fName ins outs sr) = do
+generateStatement (FuncCall fName ins outs _) = do
   inOps <- mapM (generateExpression >=> toImmutable) ins
   outOps <- mapM generateExpression outs -- TODO: death in llvm if not all outops are mutable
   funcOp <- requestFunction $ NormalSig fName (opType <$> inOps) (opType <$> outOps)
   uinstr $ Call False CC.C [] funcOp (zip (map opOp $ inOps ++ outOps) $ repeat []) [] []
 
-generateStatement (While condition stmnt sr) = do
+generateStatement (While condition stmnt _) = do
   prevDefers <- use defers
   defers . defersLoop .= []
 
@@ -86,7 +86,7 @@ generateStatement (While condition stmnt sr) = do
   use (defers . defersLoop) >>= mapM_ generateStatement
   defers .= prevDefers
 
-generateStatement (If condition thenStmnt mElseStmnt sr) = do
+generateStatement (If condition thenStmnt mElseStmnt _) = do
   thenBlock <- newBlock
   elseBlock <- newBlock
   nextBlock <- newBlock

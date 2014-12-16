@@ -47,7 +47,7 @@ generateExpression (MemberAccess expression mName sr) =
     constInt = ConstantOperand . C.Int 32
 
 -- TODO: ugly death in subscript generation if wrong type
-generateExpression (Subscript chunk index sr) = do
+generateExpression (Subscript chunk index _) = do
   c@(_, Memorychunk _ hasCap innerT, mutable) <- generateExpression chunk
   (chunkOp, _, _) <- toImmutable c
   llvmtype <- toLLVMType True innerT
@@ -56,20 +56,20 @@ generateExpression (Subscript chunk index sr) = do
   elementOp <- instr (I.GetElementPtr False ptrOp [indexOp] [], llvmtype)
   boolean return toImmutable mutable (elementOp, innerT, True)
 
-generateExpression (Un Deref expression sr) = do
+generateExpression (Un Deref expression _) = do
   (expOp, PointerT t, mutable) <- generateExpression expression
   realT <- ensureTopNotNamed t
   llvmtype <- toLLVMType mutable realT
   op <- instr (Load False expOp Nothing 0 [], llvmtype)
   return (op, realT, mutable)
 
-generateExpression (ExprLit lit sr) = return $ case lit of
+generateExpression (ExprLit lit _) = return $ case lit of
   ILit val t -> (ConstantOperand $ C.Int size val, t, False)
     where size = fromJust $ M.lookup t typeSizeMap
   FLit val t -> (ConstantOperand . C.Float $ F.Double val, t, False)
   BLit val -> (ConstantOperand . C.Int 1 $ boolean 1 0 val, BoolT, False)
 
-generateExpression (ExprFunc fName expressions t sr) = do
+generateExpression (ExprFunc fName expressions t _) = do
   ops <- mapM (generateExpression >=> toImmutable) expressions
   retty <- ensureTopNotNamed t
   funcOp <- requestFunction $ ExprSig fName (opType <$> ops) retty
@@ -77,11 +77,11 @@ generateExpression (ExprFunc fName expressions t sr) = do
   retOp <- instr (Call False CC.C [] funcOp (zip (opOp <$> ops) $ repeat []) [] [], llvmtype)
   return (retOp, t, False)
 
-generateExpression (Un AddressOf expression sr) = do
+generateExpression (Un AddressOf expression _) = do
   (op, t, True) <- generateExpression expression -- TODO: ugly death on expression not being mutable
   return (op, PointerT t, False)
 
-generateExpression (Un operator expression sr) = do
+generateExpression (Un operator expression _) = do
   (expOp, t, _) <- generateExpression expression >>= toImmutable
   llvmtype <- toLLVMType False t
   res <- instr . (, llvmtype) . (\f -> f expOp []) $ case operator of
@@ -147,7 +147,7 @@ simpleBins res1 res2 t operator sr = do
   binOp llvmOperator res1 res2
 
 shortcuts :: FuncGenOperand -> Expression -> BinOp -> SourceRange -> FuncGen FuncGenOperand
-shortcuts (op1, _, _) exp2 operator sr = do
+shortcuts (op1, _, _) exp2 operator _ = do
   block2 <- newBlock
   contBlock <- newBlock
   prevName <- use $ currentBlock . blockName
