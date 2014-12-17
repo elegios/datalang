@@ -263,3 +263,58 @@ The finished compiler will probably have three or four stages:
 
 - code generation and function selection. What's currently implemented. Will
   have to be extended.
+
+The list like structure that I had in mind has a fairly strong weakness: it only
+stores the capacity, as that is the only thing that is pretty much guaranteed to be useful.
+Many places where it would be used a length would however be useful, but I should
+not force one to be present. This basically leads to either having two types,
+which might be hard to differentiate syntactically, or just having one, requiring
+the other to be implemented manually. The latter goes against the idea of this,
+making it easy to write the least wasteful version, which basically says that it
+should be trivial to change between one and the other.
+
+[uint]*u8 is the original idea for syntax, where the type in [] denotes the specific
+type storing the size of the thing. uint is default and can be omitted. One simple
+way to differentiate would be to have some other delimiter, say () or {}. In that
+case []*u8 would have length and capacity while ()*u8 would only have capacity, or
+possibly the other way around. This would however be strange given that access will
+probably be done exclusively using []. Switching would be different to distinguish
+from expression functions as well as require a change in syntax when the semantics
+change just a little bit.
+
+Having different sizes of len and cap do not make sense to me,
+otherwise the types could differ by one having a comma between the two
+types, or just a comma if using the default size. Most of my ideas for
+this so far would have some extra symbol within the [], which might
+work, but it would look a bit strange I think.
+
+Semantically a memorychunk/list should be equivalent with either
+struct { cap : uint, content : *contenttype } or
+* struct { cap : uint, content : [0]contenttype }
+
+(This paragraph is going to talk about open and closed functions, it
+refers to whether you can add alternate implementations or not) Having
+all functions be 'open', meaning that a new definition from anywhere
+can be considered when chosing functions is probably a bad idea, it'll
+probably be way to hard to predict what is going to happen for most
+things. Instead it might be better to have a function be closed by
+default and then allowing it to be open by choice. Restricting each
+open function to a single namespace should also help with making it
+clear which one you're using. It does mean that you can't add support
+for a new data type in a function if the function wasn't written to be
+extensible, but that will probably end up being either a good thing or
+at least a neutral thing.
+
+This has a pretty high similarity to typeclasses for haskell, but
+restricted to single functions. I am unsure if it is interesting to
+just have typeclasses instead, or if this single function idea is
+useful to have. Currently a namespace can look a lot like a typeclass,
+except that there will be no requirement by the compiler to implement
+all of the functions for a type.
+
+More specifically most functions would be closed in the current
+compilation unit while some are open. If a function is closed the only
+definitions to be considered are in the current unit, otherwise they
+might be elsewhere. Closed functions could therefore be fully selected
+in type-checking. An open function has definitions from the original
+unit, imported units, and the current unit.
