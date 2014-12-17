@@ -52,6 +52,7 @@ data Statement = FuncCall String [Expression] [Expression] SourceRange
 -- TODO: For, possibly for-each
 -- TODO: Switch, match or pattern match
 -- TODO: Zero-initialization
+-- TODO: Delete/Heap/Stack?
 
 data TerminatorType = Return | Break | Continue deriving (Show, Eq)
 
@@ -75,6 +76,7 @@ data Literal = ILit Integer Type
              | FLit Double Type
              | BLit Bool deriving Show
 -- TODO: struct literals
+-- TODO: memorychunk literals
 
 {-
  - Several things that we want to represent cannot be using this ast.
