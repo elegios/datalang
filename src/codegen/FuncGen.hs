@@ -108,7 +108,7 @@ ensureTopNotNamed (NamedT tName ts) = do
   mType <- uses (genState . source) $ M.lookup tName . typeDefinitions
   case mType of
     Nothing -> throwError . ErrorString $ "Unknown type " ++ tName
-    Just (TypeDef it tNames _) -> return $ transform replaceParamTypes it
+    Just (TypeDef tNames it _) -> return $ transform replaceParamTypes it
       where
         translation = M.fromList $ zip tNames ts
         replaceParamTypes x@(NamedT innerTName []) = fromMaybe x $ M.lookup innerTName translation

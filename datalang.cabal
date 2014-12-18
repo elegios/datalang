@@ -57,7 +57,7 @@ executable datalang
   -- other-extensions:
 
   -- Other library packages from which modules are imported.
-  build-depends:       base >=4.7 && <4.8, llvm-general-pure, llvm-general, mtl, containers, lens, uniplate
+  build-depends:       base >=4.7 && <4.8, llvm-general-pure, llvm-general, mtl, containers, lens, uniplate, parsec, filepath, text
 
   -- Directories containing source files.
   hs-source-dirs:      src

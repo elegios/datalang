@@ -5,7 +5,10 @@ module Ast where
 import qualified Data.Map as M
 import Data.Data
 
-data SourceLoc = SourceLoc deriving Show
+data SourceLoc = SourceLoc File Line Column deriving Show
+type File = String
+type Line = Int
+type Column = Int
 data SourceRange = SourceRange SourceLoc SourceLoc deriving Show
 
 data FuncSig = NormalSig String [Type] [Type]
@@ -14,7 +17,7 @@ data FuncSig = NormalSig String [Type] [Type]
 data Source = Source
   { functionDefinitions :: M.Map String FuncDef
   , typeDefinitions :: M.Map String TypeDef
-  }
+  } deriving Show
 -- TODO: Some form of namespaces
 -- TODO: Constant support
 -- TODO: Function overloading and selection
@@ -27,7 +30,7 @@ data Type = I8 | I16 | I32 | I64
           | PointerT Type
           | Memorychunk Type Bool Type
           | StructT [(String, Type)] deriving (Show, Ord, Eq, Data, Typeable) -- TODO: Manual definition using uniplate.direct for speed
-data TypeDef = TypeDef Type [String] SourceRange deriving Show
+data TypeDef = TypeDef [String] Type SourceRange deriving Show
 -- TODO: More fancy pointers
 -- TODO: Find and prevent infinite recursive structures
 -- TODO: Function types
@@ -37,7 +40,7 @@ data TypeDef = TypeDef Type [String] SourceRange deriving Show
 data FuncDef = FuncDef
   { inargs :: [String]
   , outargs :: [String]
-  , statement :: Statement
+  , functionBody :: Statement
   , sourcerange :: SourceRange
   } deriving Show
 
@@ -64,6 +67,7 @@ data Expression = Bin BinOp Expression Expression SourceRange
                 | ExprFunc String [Expression] Type SourceRange
                 | ExprLit Literal SourceRange deriving Show
 -- TODO: Bitcast, conversion.
+-- TODO: Allow calling of functionpointers
 
 -- Short/Long And/Or means shortcutting/not shortcutting
 data BinOp = Plus | Minus | Times | Divide | Remainder
@@ -77,6 +81,7 @@ data Literal = ILit Integer Type
              | BLit Bool deriving Show
 -- TODO: struct literals
 -- TODO: memorychunk literals
+-- TODO: null literal
 
 {-
  - Several things that we want to represent cannot be using this ast.

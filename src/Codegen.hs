@@ -1,6 +1,9 @@
 {-# LANGUAGE TupleSections #-}
 
-module CodeGen where
+module CodeGen
+( generate
+, GenFuncs
+) where
 
 -- TODO: Save a "stack trace" of requested functions, to make it easier to figure out why a specific function was requested.
 
