@@ -34,7 +34,7 @@ langDef = T.LanguageDef
   , T.opStart = T.opLetter langDef
   , T.opLetter = oneOf "+-*/%<>=!^&|"
   , T.reservedNames = ["defer", "if", "else", "while", "return", "break", "continue"] -- TODO: all built-in type literals
-  , T.reservedOpNames = ["=", "+", "-", "*", "/", "%", "<", ">", "==", "!=", "<=", ">=", "::"] -- TODO
+  , T.reservedOpNames = ["=", "+", "-", "*", "/", "%", "<", ">", "==", "!=", "<=", ">=", ":"] -- TODO: figure out if all these need/should be added, this list is currently incomplete
   }
 
 parseFile :: FilePath -> IO (Either ParseError Source)
@@ -103,7 +103,7 @@ terminator = (withPosition $ Terminator <$> keyword) <?> "terminator"
 
 -- TODO: make varInit a bit better
 varInit :: Parser Statement
-varInit = withPosition (VarInit <$> identifier <*> (reservedOp "::" >> typeLiteral) <*> return True) <?> "var init"
+varInit = withPosition (VarInit <$> identifier <*> (reservedOp ":" >> typeLiteral) <*> return True) <?> "var init"
 
 expression :: Parser Expression
 expression = buildExpressionParser expressionTable simpleExpression <?> "expression"
@@ -153,7 +153,7 @@ exprFunc :: Parser Expression
 exprFunc = withPosition $ try (ExprFunc <$> identifier <*> argumentlist) <*> rettype
   where
     argumentlist = parens $ commaSep expression
-    rettype = reservedOp "::" >> typeLiteral
+    rettype = reservedOp ":" >> typeLiteral
 
 exprLit :: Parser Expression
 exprLit = withPosition $ ExprLit <$> variants
@@ -162,12 +162,12 @@ exprLit = withPosition $ ExprLit <$> variants
                <|> numLit
 
 numLit :: Parser Literal
-numLit = either ILit FLit <$> naturalOrFloat <*> (reservedOp "::" >> typeLiteral)
+numLit = either ILit FLit <$> naturalOrFloat <*> (reservedOp ":" >> typeLiteral)
           
 typeDef :: String -> Parser Top
 typeDef name = TypeDefinition name <$> def
   where
-    def = withPosition $ TypeDef <$> typeParams <*> (try (reservedOp "::") >> typeLiteral)
+    def = withPosition $ TypeDef <$> typeParams <*> (try (reservedOp ":") >> typeLiteral)
     typeParams = option [] . angles $ commaSep1 identifier
 
 typeLiteral :: Parser Type
@@ -212,7 +212,7 @@ chunkTypeLiteral = Memorychunk <$> brackets countType <*> return True <*> typeLi
 
 structTypeLiteral :: Parser Type
 structTypeLiteral = braces $ StructT <$> property `sepEndBy` comma
-  where property = (,) <$> identifier <*> (reservedOp "::" >> typeLiteral)
+  where property = (,) <$> identifier <*> (reservedOp ":" >> typeLiteral)
 
 withPosition :: Parser (SourceRange -> a) -> Parser a
 withPosition p = do

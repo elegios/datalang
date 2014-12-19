@@ -1,14 +1,14 @@
 main ()(a) {
-  a = 0 :: i32
-  a = other(a) :: i32
+  a = 0 : i32
+  a = other(a) : i32
   if true {
     other(a)(a)
     return
   }
   other(a)(a)
-  a = a + 2 :: i32
+  a = a + 2 : i32
 }
 
 other (a)(b) {
-  b = a + 2 :: i32
+  b = a + 2 : i32
 }
