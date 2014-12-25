@@ -15,6 +15,7 @@ import qualified LLVM.General.AST.Type as T
 import qualified LLVM.General.AST.CallingConvention as CC
 
 generateStatement :: Statement -> FuncGen ()
+-- TODO: hoist init to entryBlock
 generateStatement (VarInit vName t True _) = do
   realT <- ensureTopNotNamed t
   llvmtypeToAllocate <- toLLVMType False realT
