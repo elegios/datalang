@@ -33,7 +33,7 @@ langDef = T.LanguageDef
   , T.identLetter = alphaNum <|> char '_'
   , T.opStart = T.opLetter langDef
   , T.opLetter = oneOf "+-*/%<>=!^&|"
-  , T.reservedNames = ["defer", "if", "else", "while", "return", "break", "continue"] -- TODO: all built-in type literals
+  , T.reservedNames = ["defer", "if", "else", "while", "return", "break", "continue", "null"] -- TODO: all built-in type literals
   , T.reservedOpNames = ["=", "+", "-", "*", "/", "%", "<", ">", "==", "!=", "<=", ">=", ":"] -- TODO: figure out if all these need/should be added, this list is currently incomplete
   }
 
@@ -94,11 +94,12 @@ while = reserved "while" >> withPosition (While <$> expression <*> scope) <?> "w
 -- TODO: ensure the syntax is unambiguous even without separators, or add separators
 -- The 'end statement with linebreak if it can be ended' idea might be doable with
 -- some parser state, set by the whiteSpace parser. To look into later
+-- TODO: same operator can be both prefix and infix, causes ambiguousness
 scope :: Parser Statement
 scope = (withPosition . braces $ Scope <$> many statement) <?> "scope"
 
 terminator :: Parser Statement
-terminator = (withPosition $ Terminator <$> keyword) <?> "terminator"
+terminator = withPosition (Terminator <$> keyword) <?> "terminator"
   where keyword = replace reserved "return" Return <|> replace reserved "break" Break <|> replace reserved "continue" Continue
 
 -- TODO: make varInit a bit better
@@ -159,7 +160,11 @@ exprLit :: Parser Expression
 exprLit = withPosition $ ExprLit <$> variants
   where variants = replace reserved "true" (BLit True)
                <|> replace reserved "false" (BLit False)
+               <|> nullLit
                <|> numLit
+
+nullLit :: Parser Literal
+nullLit = reserved "null" >> Null <$> (reservedOp ":" >> typeLiteral)
 
 numLit :: Parser Literal
 numLit = either ILit FLit <$> naturalOrFloat <*> (reservedOp ":" >> typeLiteral)

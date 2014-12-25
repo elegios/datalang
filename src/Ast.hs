@@ -78,7 +78,8 @@ data UnOp = Not | BinNegate | AriNegate | Deref | AddressOf deriving Show
 
 data Literal = ILit Integer Type
              | FLit Double Type
-             | BLit Bool deriving Show
+             | BLit Bool
+             | Null Type deriving Show
 -- TODO: struct literals
 -- TODO: memorychunk literals
 -- TODO: null literal

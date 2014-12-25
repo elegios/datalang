@@ -63,11 +63,12 @@ generateExpression (Un Deref expression _) = do
   op <- instr (Load False expOp Nothing 0 [], llvmtype)
   return (op, realT, mutable)
 
-generateExpression (ExprLit lit _) = return $ case lit of
-  ILit val t -> (ConstantOperand $ C.Int size val, t, False)
+generateExpression (ExprLit lit _) = case lit of
+  ILit val t -> return (ConstantOperand $ C.Int size val, t, False)
     where size = fromJust $ M.lookup t typeSizeMap
-  FLit val t -> (ConstantOperand . C.Float $ F.Double val, t, False)
-  BLit val -> (ConstantOperand . C.Int 1 $ boolean 1 0 val, BoolT, False)
+  FLit val t -> return (ConstantOperand . C.Float $ F.Double val, t, False)
+  BLit val -> return (ConstantOperand . C.Int 1 $ boolean 1 0 val, BoolT, False)
+  Null t -> toLLVMType False t >>= \llvmt -> return (ConstantOperand $ C.Null llvmt, t, False)
 
 generateExpression (ExprFunc fName expressions t _) = do
   ops <- mapM (generateExpression >=> toImmutable) expressions
