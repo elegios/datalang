@@ -16,11 +16,16 @@ import qualified LLVM.General.AST.CallingConvention as CC
 
 generateStatement :: Statement -> FuncGen ()
 -- TODO: hoist init to entryBlock
-generateStatement (VarInit vName t True _) = do
+generateStatement (VarInit True vName t expression _) = do
   realT <- ensureTopNotNamed t
   llvmtypeToAllocate <- toLLVMType False realT
   op <- instr (Alloca llvmtypeToAllocate Nothing 0 [], T.ptr llvmtypeToAllocate)
+  (expOp, _, _) <- generateExpression expression >>= toImmutable
+  uinstr $ Store False op expOp Nothing 0 []
   locals . at vName ?= (op, realT, True)
+generateStatement (VarInit False vName _ expression _) = do
+  op <- generateExpression expression >>= toImmutable
+  locals . at vName ?= op
 
 generateStatement (Defer stmnt _) = do
   defers . defersAll %= (stmnt :)

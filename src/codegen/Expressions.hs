@@ -69,6 +69,7 @@ generateExpression (ExprLit lit _) = case lit of
   FLit val t -> return (ConstantOperand . C.Float $ F.Double val, t, False)
   BLit val -> return (ConstantOperand . C.Int 1 $ boolean 1 0 val, BoolT, False)
   Null t -> toLLVMType False t >>= \llvmt -> return (ConstantOperand $ C.Null llvmt, t, False)
+  Undef t -> toLLVMType False t >>= \llvmt -> return (ConstantOperand $ C.Undef llvmt, t, False)
 
 generateExpression (ExprFunc fName expressions t _) = do
   ops <- mapM (generateExpression >=> toImmutable) expressions

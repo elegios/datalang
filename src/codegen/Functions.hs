@@ -51,7 +51,7 @@ generateFunction sig@(ExprSig fName inTs outT) = do
         (initLocals, params) <- generateInitialFunctionLocals innames inTs [] []
         locals .= initLocals
 
-        generateStatement $ VarInit outname outT True sr
+        generateStatement $ VarInit True outname outT (Zero outT) sr
         generateStatement stmnt
 
         finalizeAndReplaceWith retBlock

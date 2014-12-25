@@ -33,7 +33,7 @@ langDef = T.LanguageDef
   , T.identLetter = alphaNum <|> char '_'
   , T.opStart = T.opLetter langDef
   , T.opLetter = oneOf "+-*/%<>=!^&|"
-  , T.reservedNames = ["defer", "if", "else", "while", "return", "break", "continue", "null"] -- TODO: all built-in type literals
+  , T.reservedNames = ["defer", "if", "else", "while", "return", "break", "continue", "null", "mut"] -- TODO: all built-in type literals
   , T.reservedOpNames = ["=", "+", "-", "*", "/", "%", "<", ">", "==", "!=", "<=", ">=", ":"] -- TODO: figure out if all these need/should be added, this list is currently incomplete
   }
 
@@ -54,7 +54,7 @@ data Top = FunctionDefinition String FuncDef | TypeDefinition String TypeDef
 -- TODO: ensure 'try' is used in the right places
 topParser :: Parser [Top]
 topParser = whiteSpace >> many (identifier >>= \n -> funcDef n <|> typeDef n)
- 
+
 funcDef :: String -> Parser Top
 funcDef name = FunctionDefinition name <$> def
   where
@@ -102,9 +102,12 @@ terminator :: Parser Statement
 terminator = withPosition (Terminator <$> keyword) <?> "terminator"
   where keyword = replace reserved "return" Return <|> replace reserved "break" Break <|> replace reserved "continue" Continue
 
--- TODO: make varInit a bit better
 varInit :: Parser Statement
-varInit = withPosition (VarInit <$> identifier <*> (reservedOp ":" >> typeLiteral) <*> return True) <?> "var init"
+varInit = withPosition (VarInit <$> mutable <*> identifier <*> typeAnno <*> value) <?> "var init"
+  where
+    mutable = option False $ replace reserved "mut" True
+    typeAnno = reservedOp ":" >> option UnknownT typeLiteral
+    value = option (Zero UnknownT) $ reservedOp "=" >> expression
 
 expression :: Parser Expression
 expression = buildExpressionParser expressionTable simpleExpression <?> "expression"
@@ -149,26 +152,24 @@ memberAccess expr = withPosition $ dot >> MemberAccess expr <$> identifier
 subscript :: Expression -> Parser Expression
 subscript expr = withPosition $ Subscript expr <$> brackets expression
 
--- TODO: infer the returntype of an exprFunc, meaning don't set it here, do it later
 exprFunc :: Parser Expression
-exprFunc = withPosition $ try (ExprFunc <$> identifier <*> argumentlist) <*> rettype
-  where
-    argumentlist = parens $ commaSep expression
-    rettype = reservedOp ":" >> typeLiteral
+exprFunc = withPosition $ try (ExprFunc <$> identifier <*> argumentlist) <*> return UnknownT
+  where argumentlist = parens $ commaSep expression
 
 exprLit :: Parser Expression
 exprLit = withPosition $ ExprLit <$> variants
   where variants = replace reserved "true" (BLit True)
                <|> replace reserved "false" (BLit False)
-               <|> nullLit
+               <|> replace reserved "null" (Null UnknownT)
+               <|> replace reserved "_" (Undef UnknownT)
                <|> numLit
 
 nullLit :: Parser Literal
-nullLit = reserved "null" >> Null <$> (reservedOp ":" >> typeLiteral)
+nullLit = replace reserved "null" $ Null UnknownT
 
 numLit :: Parser Literal
-numLit = either ILit FLit <$> naturalOrFloat <*> (reservedOp ":" >> typeLiteral)
-          
+numLit = either ILit FLit <$> naturalOrFloat <*> return UnknownT
+
 typeDef :: String -> Parser Top
 typeDef name = TypeDefinition name <$> def
   where
@@ -181,7 +182,7 @@ typeLiteral = simpleTypeLiteral
           <|> pointerTypeLiteral
           <|> chunkTypeLiteral
           <|> structTypeLiteral
-          
+
 simpleTypeLiteral :: Parser Type
 simpleTypeLiteral = uintTypeLiteral <|> remainingParser
   where
@@ -224,7 +225,7 @@ withPosition p = do
   start <- getPosition
   ret <- p
   ret <$> toSourceRange start <$> getPosition
-          
+
 toSourceRange :: SourcePos -> SourcePos -> SourceRange
 toSourceRange from to = SourceRange (toLoc from) (toLoc to)
   where toLoc pos = SourceLoc (sourceName pos) (sourceLine pos) (sourceColumn pos)
