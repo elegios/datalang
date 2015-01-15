@@ -55,10 +55,13 @@ data Top = FunctionDefinition String FuncDef | TypeDefinition String TypeDef
 topParser :: Parser [Top]
 topParser = whiteSpace >> many (identifier >>= \n -> funcDef n <|> typeDef n)
 
-funcDef :: String -> Parser Top
+funcDef :: String -> Parser Top -- TODO: proper parsing of restrictions and stuff
 funcDef name = FunctionDefinition name <$> def
   where
-    def = withPosition $ FuncDef <$> argumentlist <*> argumentlist <*> scope
+    def = withPosition $ do
+      ins <- argumentlist
+      outs <- argumentlist
+      FuncDef (const UnknownT <$> ins) (const UnknownT <$> ins) [] ins outs <$> scope
     argumentlist = parens $ commaSep identifier
 
 statement :: Parser Statement
@@ -187,22 +190,22 @@ simpleTypeLiteral :: Parser Type
 simpleTypeLiteral = uintTypeLiteral <|> remainingParser
   where
     remainingParser = choice . map (uncurry $ replace reserved) $ typePairs
-    typePairs = [ ("i8", I8)
-                , ("i16", I16)
-                , ("i32", I32)
-                , ("i64", I64)
-                , ("f32", F32)
-                , ("f64", F64)
-                , ("bool", BoolT)
+    typePairs = [ ("I8", IntT S8)
+                , ("I16", IntT S16)
+                , ("I32", IntT S32)
+                , ("I64", IntT S64)
+                , ("F32", FloatT S32)
+                , ("F64", FloatT S64)
+                , ("Bool", BoolT)
                 ]
 
 uintTypeLiteral :: Parser Type
 uintTypeLiteral = choice . map (uncurry $ replace reserved) $ typePairs
   where
-    typePairs = [ ("u8", U8)
-                , ("u16", U16)
-                , ("u32", U32)
-                , ("u64", U64)
+    typePairs = [ ("U8", UIntT S8)
+                , ("U16", UIntT S16)
+                , ("U32", UIntT S32)
+                , ("U64", UIntT S64)
                 ]
 
 namedTypeLiteral :: Parser Type
@@ -214,7 +217,7 @@ pointerTypeLiteral = reservedOp "^" >> PointerT <$> typeLiteral
 
 chunkTypeLiteral :: Parser Type
 chunkTypeLiteral = Memorychunk <$> brackets countType <*> return True <*> typeLiteral
-  where countType = option U32 uintTypeLiteral
+  where countType = option (IntT S32) uintTypeLiteral
 
 structTypeLiteral :: Parser Type
 structTypeLiteral = braces $ StructT <$> property `sepEndBy` comma

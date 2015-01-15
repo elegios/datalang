@@ -1,0 +1,36 @@
+class Accessor a -> b, c {
+  accessor : (b, a) -> (^c)
+}
+
+// where [a]b is sugar for struct{len : a, ptr : ^b}
+int a
+instance Accessor [a]b -> a, b {
+  inline
+  accessor(list, index)(item) {
+    debug {
+      if index < 0 || list.len <= index {
+        die
+      }
+    }
+    item = ^list.ptr[index]
+  }
+}
+
+// where [a,]b is sugar for struct{len : a, cap : a, ptr : ^b}
+int a
+instance Accessor [a,]b -> a, b {
+  inline
+  accessor(list, index)(item) {
+    debug {
+      if index < 0 || list.len <= index {
+        die
+      }
+    }
+    item = ^list.ptr[index]
+  }
+}
+
+/*
+int a
+instance Accessor ^b -> a, b //builtin
+*/

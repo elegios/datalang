@@ -20,7 +20,7 @@ generate sourceToGen requests = case errs of
   [] -> Right $ AST.defaultModule { AST.moduleDefinitions = structDefs ++ defs }
   _ -> Left errs
   where
-    (defs, resState) = runCodeGen (emptyState requests sourceToGen) generateFunctions 
+    (defs, resState) = runCodeGen (emptyState requests sourceToGen) generateFunctions
     errs = _errors resState
     structDefs = map fst . M.elems $ _structTypes resState
     generateFunctions = do

@@ -9,7 +9,11 @@ data SourceLoc = SourceLoc File Line Column deriving Show
 type File = String
 type Line = Int
 type Column = Int
-data SourceRange = SourceRange SourceLoc SourceLoc deriving Show
+data SourceRange = SourceRange SourceLoc SourceLoc
+
+instance Show SourceRange where
+  show (SourceRange start@(SourceLoc f _ _) end) = f ++ "(" ++ pos start ++ " - " ++ pos end ++ ")"
+    where pos (SourceLoc _ l c) = show l ++ ":" ++ show c
 
 data FuncSig = NormalSig String [Type] [Type]
              | ExprSig String [Type] Type deriving (Eq, Ord)
@@ -23,11 +27,12 @@ data SourceT t = Source
 -- TODO: Constant support
 -- TODO: Function overloading and selection
 
-data Type = I8 | I16 | I32 | I64
-          | U8 | U16 | U32 | U64
-          |            F32 | F64
-          | NamedT String [Type]
+data TSize = S8 | S16 | S32 | S64 deriving (Show, Ord, Eq, Data, Typeable)
+data Type = IntT TSize
+          | UIntT TSize
+          | FloatT TSize
           | BoolT
+          | NamedT String [Type]
           | PointerT Type
           | Memorychunk Type Bool Type
           | StructT [(String, Type)]
@@ -40,9 +45,20 @@ data TypeDef = TypeDef [String] Type SourceRange deriving Show
 -- TODO: Strings
 -- TODO: Algebraic types (as tagged unions?)
 
+type Restriction = RestrictionT Type
+data RestrictionT t = NoRestriction
+                    | PropertiesR [(String, t)]
+                    | UIntR
+                    | NumR NumSpec
+                    deriving (Show, Eq)
+data NumSpec = NoSpec | IntSpec | FloatSpec deriving (Show, Eq)
+
 type FuncDef = FuncDefT Type
 data FuncDefT t = FuncDef
-  { inargs :: [String]
+  { intypes :: [t]
+  , outTypes :: [t]
+  , restrictions :: [(String, Restriction)]
+  , inargs :: [String]
   , outargs :: [String]
   , functionBody :: StatementT t
   , sourcerange :: SourceRange
@@ -61,6 +77,7 @@ data StatementT t = FuncCall String [ExpressionT t] [ExpressionT t] SourceRange
 -- TODO: For, possibly for-each
 -- TODO: Switch, match or pattern match
 -- TODO: Delete/Heap/Stack?
+-- TODO: Defer currently just moves the statement to all places it needs to be. Introducing a new shadowing local variable will break intent. This would need to be changed in both inferrer and generator, or by an extra pass beforehand
 
 data TerminatorType = Return | Break | Continue deriving (Show, Eq)
 
@@ -78,12 +95,12 @@ data ExpressionT t = Bin BinOp (ExpressionT t) (ExpressionT t) SourceRange
 -- TODO: Allow calling of functionpointers
 -- TODO: Figure out what to do with zero, find the type and generate any possible value or expand to a large literal after inference?
 
--- Short/Long And/Or means shortcutting/not shortcutting
+-- NOTE: Short/Long And/Or means shortcutting/not shortcutting
 data BinOp = Plus | Minus | Times | Divide | Remainder
            | Lesser | Greater | LE | GE | Equal | NotEqual
            | ShortAnd | ShortOr | LongAnd | LongOr
            | BinAnd | BinOr | LShift | LogRShift | AriRShift | Xor
-           deriving Show
+           deriving (Show, Eq)
 data UnOp = Not | BinNegate | AriNegate | Deref | AddressOf deriving Show
 
 type Literal = LiteralT Type

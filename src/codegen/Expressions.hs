@@ -5,7 +5,6 @@ module CodeGen.Expressions where
 import Ast
 import CodeGen.FuncGen
 import CodeGen.Basics
-import Data.Maybe
 import Data.Functor ((<$>))
 import Control.Lens hiding (op, index, parts, transform)
 import Control.Monad.Except
@@ -18,7 +17,6 @@ import qualified LLVM.General.AST.CallingConvention as CC
 import qualified LLVM.General.AST.Constant as C
 import qualified LLVM.General.AST as AST
 import qualified LLVM.General.AST.Float as F
-import qualified Data.Map as M
 
 generateExpression :: Expression -> FuncGen FuncGenOperand
 generateExpression (Variable vName sr) =
@@ -65,7 +63,7 @@ generateExpression (Un Deref expression _) = do
 
 generateExpression (ExprLit lit _) = case lit of
   ILit val t -> return (ConstantOperand $ C.Int size val, t, False)
-    where size = fromJust $ M.lookup t typeSizeMap
+    where size = getSize t
   FLit val t -> return (ConstantOperand . C.Float $ F.Double val, t, False)
   BLit val -> return (ConstantOperand . C.Int 1 $ boolean 1 0 val, BoolT, False)
   Null t -> toLLVMType False t >>= \llvmt -> return (ConstantOperand $ C.Null llvmt, t, False)
@@ -97,9 +95,9 @@ generateExpression (Un operator expression _) = do
     zero t = if isFloat t
       then ConstantOperand . C.Float $ F.Double 0
       else ConstantOperand $ C.Int size 0
-      where size = fromJust $ M.lookup t typeSizeMap
+      where size = getSize t
     one t = ConstantOperand $ C.Int size 0
-      where size = fromJust $ M.lookup t typeSizeMap
+      where size = getSize t
 
 generateExpression (Bin operator exp1 exp2 sr) = do
   res1@(_, t1, _) <- generateExpression exp1 >>= toImmutable

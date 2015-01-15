@@ -28,7 +28,7 @@ generateFunction sig@(NormalSig fName inTs outTs) = do
   currGenState <- get
   let generateBody = do
         mFunc <- uses (genState. source . to functionDefinitions) $ M.lookup fName
-        (FuncDef innames outnames stmnt _) <- justErr (ErrorString $ "Function " ++ fName ++ " not found") mFunc
+        (FuncDef _ _ _ innames outnames stmnt _) <- justErr (ErrorString $ "Function " ++ fName ++ " not found") mFunc
 
         (initLocals, params) <- generateInitialFunctionLocals innames inTs outnames outTs
         locals .= initLocals
@@ -45,7 +45,7 @@ generateFunction sig@(ExprSig fName inTs outT) = do
       entryBlock = BasicBlock (Name "entry") [] . Do $ Br (Name "returnBlock") []
       retBlock = BasicBlock (Name "returnBlock") [] . Do $ Ret Nothing []
       generateBody = do
-        (FuncDef innames [outname] stmnt sr) <- use (genState . source . to functionDefinitions . at fName) -- TODO: ugly death on incorrect number of outarguments
+        (FuncDef _ _ _ innames [outname] stmnt sr) <- use (genState . source . to functionDefinitions . at fName) -- TODO: ugly death on incorrect number of outarguments
                                                 >>= justErr (ErrorString $ "Function " ++ fName ++ " not found")
 
         (initLocals, params) <- generateInitialFunctionLocals innames inTs [] []
@@ -73,7 +73,7 @@ generateInitialFunctionLocals innames inTs outnames outTs = do
       params = zipWith3 Parameter llvmparams llvmnames (repeat [])
 
       paramLocals = zipWith LocalReference llvmparams llvmnames
-      initialLocals = M.fromList . zip (innames ++ outnames) . zipWith ($) types $ paramLocals 
+      initialLocals = M.fromList . zip (innames ++ outnames) . zipWith ($) types $ paramLocals
   return (initialLocals, params)
 
 constructFunctionDeclaration :: FuncSig -> [Parameter] -> T.Type -> FuncGen AST.Definition
@@ -87,4 +87,3 @@ constructFunctionDeclaration sig params retty = do
     , basicBlocks = reverse blocks
     , returnType = retty
     }
-

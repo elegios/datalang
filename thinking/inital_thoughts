@@ -318,3 +318,78 @@ definitions to be considered are in the current unit, otherwise they
 might be elsewhere. Closed functions could therefore be fully selected
 in type-checking. An open function has definitions from the original
 unit, imported units, and the current unit.
+
+# Attempt at type system
+
+These are the only ones that exist during runtime. (concrete types)
+- Simple types. i{8,16,32,64}, u{8,16,32,64}, f{32,64}, bool
+- Compound types: struct, function/proc, array/memchunk, pointer
+
+In a function signature more types may appear. Those are there to
+enable a function to be generated for multiple concrete types, while
+ensuring that no attempt will ever be made to generate an impossible
+function. These other types are not actually types, rather
+requirements and restrictions on types.
+
+These include (a, b, c, etc represent concrete types, or type variables that may have requirements elsewhere):
+- has{"prop" : a}, has a property .prop of type a
+- num, is numerical, ie +-/*% works (not entirely sure about %, might not be
+  applicable to non-integers). Not sure if this should include uints or not.
+- float, is of a float type
+- int, is of an int type (not uint)
+- uint, is of a uint type
+- typeclass instance. Not sure about name, but it would be nice with 2 or more parameters as well as -> rules
+
+Rules: (=>) means 'can be narrowed to'
+has{} xor (num or float or int or uint) xor bool
+uint xor int xor float
+num => uint or int or float
+uint => u8 or u16...
+int => i8 or i16...
+float => f32 or f64
+has{ps} => struct{ps'}, ps subset of ps'
+has{len : a} => [a]b or [a,]b (without or with cap)
+has{len : a, cap : a} => [a,]b
+
+Typeclasses are trickier than the rest, they are kind of external to
+the types. They would most likely be made to exist outside of the
+type, on the function level, "this function requires there to be an
+instance of these typeclasses with these typeparameters".  Note that
+has[] is actually a typeclass, and should quite probably be
+implemented as one.
+
+// a is the container, b the indexing type, c the contained type
+typeclass Accessor a -> b, c {
+  accessor : (a, b) -> (^c)
+}
+
+I will probably postpone implementation of actual typeclasses, instead
+leaving them for later. This means that for a while the [] operator
+will not pass typechecking, even if it should be a correct usage of
+it.
+
+Note: the current implementation of type inference treats all named
+types as different from the underlying type. There will be implicit
+type elevation from a basic type to a named type when they are
+unified, poisoning the basic value to always have the elevated type if
+it can be changed. This will for example appear strange in a case like
+this:
+
+T : {a : int, b : int}
+
+(int, int) -> ({a : int, b : int})
+f(a, b)(ret) {
+  ret.a = a
+  ret.b = b
+}
+
+main ()() {
+  t : T
+  t = f(2, 4)
+}
+
+In main typeinference will deduced the type of f(2, 4) : {a : int, b :
+int}, then unify with T, which works but changes the type of f(2, 4) :
+T, which is different. Codegen may or may not deal with this in the
+correct way, depending on how function implementation instantiation
+works.

@@ -45,57 +45,45 @@ justErr err Nothing = throwError err
 -- Helpers
 
 isFloat :: Type -> Bool
-isFloat F32 = True
-isFloat F64 = True
+isFloat (FloatT _) = True
 isFloat _ = False
 
 isUnsigned :: Type -> Bool
-isUnsigned U8 = True
-isUnsigned U16 = True
-isUnsigned U32 = True
-isUnsigned U64 = True
+isUnsigned (UIntT _) = True
 isUnsigned _ = False
 
-isNum :: Type -> Bool
-isNum I8 = True
-isNum I16 = True
-isNum I32 = True
-isNum I64 = True
+isNum :: Type -> Bool -- FIXME: check for ocurrences of this, they may be wrong given than uints should not really be numbers
+isNum (IntT _) = True
 isNum n = isFloat n || isUnsigned n
 
 typeMap :: M.Map Type T.Type
 typeMap = M.fromList
-  [ (I8, T.i8)
-  , (I16, T.i16)
-  , (I32, T.i32)
-  , (I64, T.i64)
+  [ (IntT S8, T.i8)
+  , (IntT S16, T.i16)
+  , (IntT S32, T.i32)
+  , (IntT S64, T.i64)
 
-  , (U8, T.i8)
-  , (U16, T.i16)
-  , (U32, T.i32)
-  , (U64, T.i64)
+  , (UIntT S8, T.i8)
+  , (UIntT S16, T.i16)
+  , (UIntT S32, T.i32)
+  , (UIntT S64, T.i64)
 
-  , (F32, T.float)
-  , (F64, T.double)
+  , (FloatT S32, T.float)
+  , (FloatT S64, T.double)
 
   , (BoolT, T.i1)
   ]
 
-typeSizeMap :: M.Map Type Word32
-typeSizeMap = M.fromList
-  [ (I8, 8)
-  , (I16, 16)
-  , (I32, 32)
-  , (I64, 64)
+getSize :: Type -> Word32
+getSize (IntT s) = sizeToWord32 s
+getSize (UIntT s) = sizeToWord32 s
+getSize (FloatT s) = sizeToWord32 s
 
-  , (U8, 8)
-  , (U16, 16)
-  , (U32, 32)
-  , (U64, 64)
-
-  , (F32, 32)
-  , (F64, 64)
-  ]
+sizeToWord32 :: TSize -> Word32
+sizeToWord32 S8 = 8
+sizeToWord32 S16 = 8
+sizeToWord32 S32 = 8
+sizeToWord32 S64 = 8
 
 extractNameFromCallableOperand :: CallableOperand -> AST.Name
 extractNameFromCallableOperand (Right (ConstantOperand (C.GlobalReference _ n))) = n
@@ -126,7 +114,7 @@ errors inj g = (\errs -> g { _errors = errs }) <$> inj (_errors g)
 {-# INLINE errors #-}
 
 -- manual lenses
-               
+
 blockInstrs :: Functor f => ([AST.Named AST.Instruction] -> f [AST.Named AST.Instruction]) -> AST.BasicBlock -> f AST.BasicBlock
 blockInstrs inj (AST.BasicBlock n i t) = (\is -> AST.BasicBlock n is t) <$> inj i
 {-# INLINE blockInstrs #-}
@@ -135,6 +123,6 @@ blockTerminator :: Functor f => (AST.Named AST.Terminator -> f (AST.Named AST.Te
 blockTerminator inj (AST.BasicBlock n i t) = AST.BasicBlock n i <$> inj t
 {-# INLINE blockTerminator #-}
 
-blockName :: Functor f => (AST.Name-> f AST.Name) -> AST.BasicBlock -> f AST.BasicBlock
+blockName :: Functor f => (AST.Name -> f AST.Name) -> AST.BasicBlock -> f AST.BasicBlock
 blockName inj (AST.BasicBlock n i t) = (\n' -> AST.BasicBlock n' i t) <$> inj n
 {-# INLINE blockName #-}

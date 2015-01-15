@@ -3,6 +3,7 @@ module Main where
 import CodeGen
 import Ast
 import Parser
+import Inference
 import System.FilePath
 import System.Environment (getArgs)
 -- import Text.Parsec.Error
@@ -17,13 +18,18 @@ import LLVM.General.Context
 import LLVM.General.Target
 import LLVM.General.Analysis
 import Control.Monad.Except (runExceptT, ExceptT(..))
+import Control.Monad (unless)
 
 main :: IO ()
 main = do
   sourceFile : _ <- getArgs
   source <- parseFile sourceFile >>= either (fail . show) return
-  writeSourceToObjectFile source requested $ replaceExtension sourceFile "o"
-  where requested = Map.fromList [(ExprSig "main" [] I32, Right . O.ConstantOperand . C.GlobalReference (T.FunctionType T.i32 [] False) $ Name.Name "main")]
+  let (inferenceErrors, inferredSource) = fullInfer source
+  unless (null inferenceErrors) $ do
+    mapM_ print inferenceErrors
+    fail "Got inference errors"
+  writeSourceToObjectFile inferredSource requested $ replaceExtension sourceFile "o"
+  where requested = Map.fromList [(ExprSig "main" [] (IntT S32), Right . O.ConstantOperand . C.GlobalReference (T.FunctionType T.i32 [] False) $ Name.Name "main")]
 
 writeSourceToObjectFile :: Source -> GenFuncs -> FilePath -> IO ()
 writeSourceToObjectFile source requested oPath = case generate source requested of
