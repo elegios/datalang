@@ -142,7 +142,6 @@ findMemberIndex :: String -> Type -> SourceRange -> FuncGen (Integer, Type)
 findMemberIndex mName (StructT fields) sr = case find (\(_, (n, _)) -> n == mName) $ zip [0..] fields of
   Just (i, (_, t)) -> return (i, t)
   Nothing -> throwError . ErrorString $ "Unknown member field " ++ mName ++ " in struct at " ++ show sr
--- TODO: ugly death in findMemberIndex on strange memorychunks
 findMemberIndex mName (Memorychunk iType _ _) _ = return . (, iType) $ case mName of
   "len" -> 0
   "cap" -> 1

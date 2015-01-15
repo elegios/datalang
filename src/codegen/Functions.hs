@@ -45,8 +45,9 @@ generateFunction sig@(ExprSig fName inTs outT) = do
       entryBlock = BasicBlock (Name "entry") [] . Do $ Br (Name "returnBlock") []
       retBlock = BasicBlock (Name "returnBlock") [] . Do $ Ret Nothing []
       generateBody = do
-        (FuncDef _ _ _ innames [outname] stmnt sr) <- use (genState . source . to functionDefinitions . at fName) -- TODO: ugly death on incorrect number of outarguments
-                                                >>= justErr (ErrorString $ "Function " ++ fName ++ " not found")
+        (FuncDef _ _ _ innames [outname] stmnt sr) <-
+          use (genState . source . to functionDefinitions . at fName)
+          >>= justErr (ErrorString $ "Function " ++ fName ++ " not found")
 
         (initLocals, params) <- generateInitialFunctionLocals innames inTs [] []
         locals .= initLocals

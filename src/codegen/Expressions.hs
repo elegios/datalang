@@ -44,7 +44,6 @@ generateExpression (MemberAccess expression mName sr) =
       else ExtractValue bottomOp [fromInteger index] []
     constInt = ConstantOperand . C.Int 32
 
--- TODO: ugly death in subscript generation if wrong type
 generateExpression (Subscript chunk index _) = do
   c@(_, Memorychunk _ hasCap innerT, mutable) <- generateExpression chunk
   (chunkOp, _, _) <- toImmutable c
@@ -181,7 +180,6 @@ shortcuts (op1, _, _) exp2 operator _ = do
   return (op, BoolT, False)
 
 structBins :: FuncGenOperand -> FuncGenOperand -> [(String, Type)] -> BinOp -> SourceRange -> FuncGen FuncGenOperand
--- TODO: ugly death upon operator that is not Equal or NotEqual for structs
 structBins res1 res2 props operator sr = do
   first : bools <- mapM (loadProp res1 res2) . zip [0..] $ snd <$> props
   foldM (binOp andOr) first bools

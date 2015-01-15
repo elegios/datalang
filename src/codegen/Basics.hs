@@ -52,7 +52,7 @@ isUnsigned :: Type -> Bool
 isUnsigned (UIntT _) = True
 isUnsigned _ = False
 
-isNum :: Type -> Bool -- FIXME: check for ocurrences of this, they may be wrong given than uints should not really be numbers
+isNum :: Type -> Bool
 isNum (IntT _) = True
 isNum n = isFloat n || isUnsigned n
 
