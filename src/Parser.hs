@@ -1,6 +1,6 @@
 {-# LANGUAGE FlexibleContexts #-}
 
-module Parser where
+module Parser (parseFile) where
 
 import Ast
 import Data.Functor ((<$>), (<$))
@@ -61,7 +61,7 @@ funcDef name = FunctionDefinition name <$> def
     def = withPosition $ do
       ins <- argumentlist
       outs <- argumentlist
-      FuncDef (const UnknownT <$> ins) (const UnknownT <$> ins) [] ins outs <$> scope
+      FuncDef (const UnknownT <$> ins) (const (IntT S32) <$> outs) [] ins outs <$> scope
     argumentlist = parens $ commaSep identifier
 
 statement :: Parser Statement
@@ -160,17 +160,14 @@ exprFunc = withPosition $ try (ExprFunc <$> identifier <*> argumentlist) <*> ret
   where argumentlist = parens $ commaSep expression
 
 exprLit :: Parser Expression
-exprLit = withPosition $ ExprLit <$> variants
+exprLit = withPosition $ ExprLit <$> withPosition variants
   where variants = replace reserved "true" (BLit True)
                <|> replace reserved "false" (BLit False)
                <|> replace reserved "null" (Null UnknownT)
                <|> replace reserved "_" (Undef UnknownT)
                <|> numLit
 
-nullLit :: Parser Literal
-nullLit = replace reserved "null" $ Null UnknownT
-
-numLit :: Parser Literal
+numLit :: Parser (SourceRange -> Literal)
 numLit = either ILit FLit <$> naturalOrFloat <*> return UnknownT
 
 typeDef :: String -> Parser Top

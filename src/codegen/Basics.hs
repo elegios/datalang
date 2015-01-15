@@ -81,9 +81,9 @@ getSize (FloatT s) = sizeToWord32 s
 
 sizeToWord32 :: TSize -> Word32
 sizeToWord32 S8 = 8
-sizeToWord32 S16 = 8
-sizeToWord32 S32 = 8
-sizeToWord32 S64 = 8
+sizeToWord32 S16 = 16
+sizeToWord32 S32 = 32
+sizeToWord32 S64 = 64
 
 extractNameFromCallableOperand :: CallableOperand -> AST.Name
 extractNameFromCallableOperand (Right (ConstantOperand (C.GlobalReference _ n))) = n

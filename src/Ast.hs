@@ -104,11 +104,11 @@ data BinOp = Plus | Minus | Times | Divide | Remainder
 data UnOp = Not | BinNegate | AriNegate | Deref | AddressOf deriving Show
 
 type Literal = LiteralT Type
-data LiteralT t = ILit Integer t
-                | FLit Double t
-                | BLit Bool
-                | Null t
-                | Undef t
+data LiteralT t = ILit Integer t SourceRange
+                | FLit Double t SourceRange
+                | BLit Bool SourceRange
+                | Null t SourceRange
+                | Undef t SourceRange
                 deriving Show
 -- TODO: struct literals
 -- TODO: memorychunk literals

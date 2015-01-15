@@ -1,14 +1,12 @@
 main ()(ret) {
-  ret = 0 : i32
-  a : u64
-  a = 4 : u64
-  bo : bool
-  bo = true
+  ret = 0
+  mut a : I64 = 4
+  mut bo : = true
   bo = false
-  while a < 10 : u64 {
-    a = a * 2 : u64
+  while a < 10 {
+    a = a * 2
   }
-  while a < 1000000000 : u64 {
-    a = a + 1 : u64
+  while a < 1000000000 {
+    a = a + 1
   }
 }

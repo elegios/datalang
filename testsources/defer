@@ -1,6 +1,6 @@
 main()(ret) {
   ret = 0
-  extra : i32
+  mut extra : = 0
   defer ret = ret - 1
 
   while ret < 4 {

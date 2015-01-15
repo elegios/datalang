@@ -18,6 +18,7 @@ import qualified LLVM.General.AST.Constant as C
 import qualified LLVM.General.AST as AST
 import qualified LLVM.General.AST.Float as F
 
+-- TODO: generate zero expression
 generateExpression :: Expression -> FuncGen FuncGenOperand
 generateExpression (Variable vName sr) =
   use (locals . at vName) >>= justErr (ErrorString $ "Unknown variable " ++ vName ++ " at " ++ show sr)
@@ -54,20 +55,13 @@ generateExpression (Subscript chunk index _) = do
   elementOp <- instr (I.GetElementPtr False ptrOp [indexOp] [], llvmtype)
   boolean return toImmutable mutable (elementOp, innerT, True)
 
-generateExpression (Un Deref expression _) = do
-  (expOp, PointerT t, mutable) <- generateExpression expression
-  realT <- ensureTopNotNamed t
-  llvmtype <- toLLVMType mutable realT
-  op <- instr (Load False expOp Nothing 0 [], llvmtype)
-  return (op, realT, mutable)
-
 generateExpression (ExprLit lit _) = case lit of
-  ILit val t -> return (ConstantOperand $ C.Int size val, t, False)
+  ILit val t _ -> return (ConstantOperand $ C.Int size val, t, False)
     where size = getSize t
-  FLit val t -> return (ConstantOperand . C.Float $ F.Double val, t, False)
-  BLit val -> return (ConstantOperand . C.Int 1 $ boolean 1 0 val, BoolT, False)
-  Null t -> toLLVMType False t >>= \llvmt -> return (ConstantOperand $ C.Null llvmt, t, False)
-  Undef t -> toLLVMType False t >>= \llvmt -> return (ConstantOperand $ C.Undef llvmt, t, False)
+  FLit val t _ -> return (ConstantOperand . C.Float $ F.Double val, t, False)
+  BLit val _ -> return (ConstantOperand . C.Int 1 $ boolean 1 0 val, BoolT, False)
+  Null t _ -> toLLVMType False t >>= \llvmt -> return (ConstantOperand $ C.Null llvmt, t, False)
+  Undef t _ -> toLLVMType False t >>= \llvmt -> return (ConstantOperand $ C.Undef llvmt, t, False)
 
 generateExpression (ExprFunc fName expressions t _) = do
   ops <- mapM (generateExpression >=> toImmutable) expressions
@@ -76,6 +70,13 @@ generateExpression (ExprFunc fName expressions t _) = do
   llvmtype <- toLLVMType False t
   retOp <- instr (Call False CC.C [] funcOp (zip (opOp <$> ops) $ repeat []) [] [], llvmtype)
   return (retOp, t, False)
+
+generateExpression (Un Deref expression _) = do
+  (expOp, PointerT t, mutable) <- generateExpression expression
+  realT <- ensureTopNotNamed t
+  llvmtype <- toLLVMType mutable realT
+  op <- instr (Load False expOp Nothing 0 [], llvmtype)
+  return (op, realT, mutable)
 
 generateExpression (Un AddressOf expression _) = do
   (op, t, True) <- generateExpression expression -- TODO: ugly death on expression not being mutable
@@ -111,6 +112,8 @@ generateExpression (Bin operator exp1 exp2 sr) = do
       res2@(_, t2, _) <- generateExpression exp2 >>= toImmutable
       when (t1 /= t2) . throwError . ErrorString $ "The expressions around " ++ show operator ++ " at " ++ show sr ++ " have different types (" ++ show t1 ++ " != " ++ show t2 ++ ")"
       simpleBins res1 res2 t1 operator sr
+
+generateExpression (Zero t) = return (ConstantOperand $ C.Int 32 0, IntT S32, False) -- FIXME: correct implementation of this
 
 simpleBins :: FuncGenOperand -> FuncGenOperand -> Type -> BinOp -> SourceRange -> FuncGen FuncGenOperand
 simpleBins res1 res2 t operator sr = do
