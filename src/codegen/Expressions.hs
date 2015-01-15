@@ -18,7 +18,6 @@ import qualified LLVM.General.AST.Constant as C
 import qualified LLVM.General.AST as AST
 import qualified LLVM.General.AST.Float as F
 
--- TODO: generate zero expression
 generateExpression :: Expression -> FuncGen FuncGenOperand
 generateExpression (Variable vName sr) =
   use (locals . at vName) >>= justErr (ErrorString $ "Unknown variable " ++ vName ++ " at " ++ show sr)
@@ -113,7 +112,17 @@ generateExpression (Bin operator exp1 exp2 sr) = do
       when (t1 /= t2) . throwError . ErrorString $ "The expressions around " ++ show operator ++ " at " ++ show sr ++ " have different types (" ++ show t1 ++ " != " ++ show t2 ++ ")"
       simpleBins res1 res2 t1 operator sr
 
-generateExpression (Zero t) = return (ConstantOperand $ C.Int 32 0, IntT S32, False) -- FIXME: correct implementation of this
+generateExpression (Zero t) = toLLVMType False t >> (, t, False) . ConstantOperand <$> generateZero t
+  where
+    generateZero :: Type -> FuncGen C.Constant
+    generateZero (StructT ps) = do
+      Just (AST.TypeDefinition n _, _) <- use (genState . structTypes . at (snd <$> ps))
+      C.Struct (Just n) False <$> mapM (generateZero . snd) ps
+    generateZero (PointerT it) = C.Null <$> toLLVMType False it
+    generateZero BoolT = return $ C.Int 1 0
+    generateZero (FloatT S32) = return . C.Float $ F.Single 0
+    generateZero (FloatT S64) = return . C.Float $ F.Double 0
+    generateZero nt = return $ C.Int (getSize nt) 0
 
 simpleBins :: FuncGenOperand -> FuncGenOperand -> Type -> BinOp -> SourceRange -> FuncGen FuncGenOperand
 simpleBins res1 res2 t operator sr = do

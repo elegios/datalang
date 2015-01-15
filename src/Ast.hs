@@ -93,7 +93,6 @@ data ExpressionT t = Bin BinOp (ExpressionT t) (ExpressionT t) SourceRange
                    deriving Show
 -- TODO: Bitcast, conversion.
 -- TODO: Allow calling of functionpointers
--- TODO: Figure out what to do with zero, find the type and generate any possible value or expand to a large literal after inference?
 
 -- NOTE: Short/Long And/Or means shortcutting/not shortcutting
 data BinOp = Plus | Minus | Times | Divide | Remainder
