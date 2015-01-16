@@ -33,7 +33,7 @@ langDef = T.LanguageDef
   , T.identLetter = alphaNum <|> char '_'
   , T.opStart = T.opLetter langDef
   , T.opLetter = oneOf "+-*/%<>=!^&|"
-  , T.reservedNames = ["defer", "if", "else", "while", "return", "break", "continue", "null", "mut"] -- TODO: all built-in type literals
+  , T.reservedNames = ["defer", "if", "else", "while", "return", "break", "continue", "null", "mut", "func"] -- TODO: all built-in type literals
   , T.reservedOpNames = ["=", "+", "-", "*", "/", "%", "<", ">", "==", "!=", "<=", ">=", ":"] -- TODO: figure out if all these need/should be added, this list is currently incomplete
   }
 
@@ -53,16 +53,27 @@ data Top = FunctionDefinition String FuncDef | TypeDefinition String TypeDef
 
 -- TODO: ensure 'try' is used in the right places
 topParser :: Parser [Top]
-topParser = whiteSpace >> many (identifier >>= \n -> funcDef n <|> typeDef n)
+topParser = whiteSpace >> many (funcDef <|> typeDef)
 
-funcDef :: String -> Parser Top -- TODO: proper parsing of restrictions and stuff
-funcDef name = FunctionDefinition name <$> def
+funcDef :: Parser Top
+funcDef = withPosition $ reserved "func" >> makedef <$> identifier <*> def
   where
-    def = withPosition $ do
-      ins <- argumentlist
-      outs <- argumentlist
-      FuncDef (const UnknownT <$> ins) (const (IntT S32) <$> outs) [] ins outs <$> scope
-    argumentlist = parens $ commaSep identifier
+    makedef n d sr = FunctionDefinition n $ d sr
+    def = do
+      restrs <- option [] . braces $ many restriction
+      (inTs, outTs) <- funcsig typeLiteral
+      (ins, outs) <- funcsig identifier
+      FuncDef inTs outTs restrs ins outs <$> scope
+    funcsig p = (,) <$> commaSep p <* reservedOp "->" <*> commaSep p
+
+restriction :: Parser (String, Restriction)
+restriction = (,) <$> identifier <*> (numR <|> uintR <|> propertiesR)
+  where
+    numR = replace reserved "num" (NumR NoSpec)
+       <|> replace reserved "int" (NumR IntSpec)
+       <|> replace reserved "float" (NumR FloatSpec)
+    uintR = replace reserved "uint" UIntR
+    propertiesR = (\(StructT ps) -> PropertiesR ps) <$> structTypeLiteral
 
 statement :: Parser Statement
 statement = funcCall
@@ -170,10 +181,11 @@ exprLit = withPosition $ ExprLit <$> withPosition variants
 numLit :: Parser (SourceRange -> Literal)
 numLit = either ILit FLit <$> naturalOrFloat <*> return UnknownT
 
-typeDef :: String -> Parser Top
-typeDef name = TypeDefinition name <$> def
+typeDef :: Parser Top
+typeDef = withPosition $ makedef <$> identifier <*> def
   where
-    def = withPosition $ TypeDef <$> typeParams <*> (try (reservedOp ":") >> typeLiteral)
+    makedef n d sr = TypeDefinition n $ d sr
+    def = TypeDef <$> typeParams <*> (try (reservedOp ":") >> typeLiteral)
     typeParams = option [] . angles $ commaSep1 identifier
 
 typeLiteral :: Parser Type

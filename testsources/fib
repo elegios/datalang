@@ -1,0 +1,17 @@
+func fib {
+  nT num
+  cT num
+}
+nT -> cT
+n -> c {
+  mut a := 1
+  mut b := 1
+  c = 1
+  n = n - 2
+  while n > 0 {
+    next := a + b
+    a = b
+    b = c
+    c = next
+  }
+}

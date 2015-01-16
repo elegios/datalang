@@ -6,7 +6,7 @@ import Parser
 import Inference
 import System.FilePath
 import System.Environment (getArgs)
--- import Text.Parsec.Error
+import System.Exit (exitFailure)
 import qualified Data.Map as Map
 import qualified LLVM.General.AST as AST
 import qualified LLVM.General.AST.Type as T
@@ -20,20 +20,22 @@ import LLVM.General.Analysis
 import Control.Monad.Except (runExceptT, ExceptT(..))
 import Control.Monad (unless)
 
+-- FIXME: codegen cannot handle typevars, add lookup for them or something
 main :: IO ()
 main = do
   sourceFile : _ <- getArgs
   source <- parseFile sourceFile >>= either (fail . show) return
   let (inferenceErrors, inferredSource) = fullInfer source
   unless (null inferenceErrors) $ do
+    putStrLn "inference errors:"
     mapM_ print inferenceErrors
-    fail "Got inference errors"
+    exitFailure
   writeSourceToObjectFile inferredSource requested $ replaceExtension sourceFile "o"
   where requested = Map.fromList [(ExprSig "main" [] (IntT S32), Right . O.ConstantOperand . C.GlobalReference (T.FunctionType T.i32 [] False) $ Name.Name "main")]
 
 writeSourceToObjectFile :: Source -> GenFuncs -> FilePath -> IO ()
 writeSourceToObjectFile source requested oPath = case generate source requested of
-  Left errs -> putStrLn "errors: " >> print errs
+  Left errs -> putStrLn "codegen errors: " >> print errs
   Right mod -> asGeneralModule mod (\m -> do
     verifyResult <- runExceptT $ verify m
     case verifyResult of

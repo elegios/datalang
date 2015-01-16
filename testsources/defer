@@ -1,4 +1,6 @@
-main()(ret) {
+func main
+-> I32
+-> ret {
   ret = 0
   mut extra := 0
   defer ret = ret - 1

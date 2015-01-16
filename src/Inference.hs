@@ -21,7 +21,7 @@ import qualified Data.Set as S
 type UnifyError = String
 type UnifyErrorFunction = UnifyError -> ErrorMessage
 
-data Changeable = Changeable | Unchangeable deriving Eq
+data Changeable = Changeable | Unchangeable String deriving Eq
 
 data ErrorMessage = ErrorString String deriving Show
 data InferrerState s = InferrerState
@@ -272,7 +272,7 @@ convertBack errF tref = fullReadType tref >>= \t -> case t of
   (b@(Unbound _), Changeable) -> do
     addError . errF $ "A changeable unbound type variable cannot remain after typechecking: " ++ show b
     return Ast.UnknownT
-  -- (Unbound _, Unchangeable) -> -- TODO: convert to a lowercase type variable name
+  (Unbound _, Unchangeable n) -> return $ Ast.NamedT n []
   (NamedT n its, _) -> Ast.NamedT n <$> mapM (convertBack errF) its
   (PointerT it, _) -> Ast.PointerT <$> convertBack errF it
   (MemorychunkT it1 cap it2, _) -> Ast.Memorychunk <$> convertBack errF it1 <*> return cap <*> convertBack errF it2
@@ -282,7 +282,6 @@ convertBack errF tref = fullReadType tref >>= \t -> case t of
   (it, _) -> return $ case it of
     BoolT -> Ast.BoolT
     IntT s -> Ast.IntT s; UIntT s -> Ast.UIntT s; FloatT s -> Ast.FloatT s
-
 
 unifyExternalFunction :: String -> [TypeRef s] -> [TypeRef s] -> SourceRange -> Inferrer s ()
 unifyExternalFunction fName inTs outTs sr = do
@@ -303,11 +302,11 @@ unify errF r1 r2 = pointingToSame r1 r2 >>= boolean (return r1) (do
   (t1, r1c) <- fullReadType r1
   (t2, r2c) <- fullReadType r2
   case (r1c, r2c) of
-    (Unchangeable, Unchangeable) | t1 /= t2 -> -- NOTE: Unchangeable types are constructed in such a way that equivalent types have the same references, thus this works
+    (Unchangeable _, Unchangeable _) | t1 /= t2 -> -- NOTE: Unchangeable types are constructed in such a way that equivalent types have the same references, thus this works
       addError . errF $ "Attempt to unify two unchangeable type values (" ++ show t1 ++ " and " ++ show t2 ++ ")"
-    (Unchangeable, Unchangeable) -> return ()
-    (Unchangeable, _) -> forceUnify errF Unchangeable (r1, t1) (r2, t2)
-    (_, Unchangeable) -> forceUnify errF Unchangeable (r2, t2) (r1, t1)
+    (Unchangeable _, Unchangeable _) -> return ()
+    (u@(Unchangeable _), _) -> forceUnify errF u (r1, t1) (r2, t2)
+    (_, u@(Unchangeable _)) -> forceUnify errF u (r2, t2) (r1, t1)
     _ -> forceUnify errF Changeable (r1, t1) (r2, t2)
   return r1)
 
@@ -382,7 +381,7 @@ applyRestriction errF changeable (r, Unbound (PropertiesR origPs)) (PropertiesR 
       | opName == rpName = (:) <$> ((opName,) <$> unify errF opR rpR) <*> recurse origPs restrPs
       | opName < rpName = (op :) <$> recurse origTail allRestrs
       | opName > rpName = do
-          when (changeable == Unchangeable) . addError . errF $ "Cannot change unchangeable type value"
+          unless (changeable == Changeable) . addError . errF $ "Cannot change unchangeable type value"
           (rp :) <$> recurse allOrigs restrTail
 
 applyRestriction errF _ (_, t) restr = addError . errF $ "Could not apply restriction " ++ show restr ++ " on type " ++ show t
@@ -396,7 +395,7 @@ accessProperty errF member r = do
       Nothing -> do
         addError . errF $ "Struct lacks a property with the name " ++ member
         newTypeRef $ Unbound NoRestriction
-    (_, Unchangeable) -> do
+    (_, Unchangeable _) -> do
       addError . errF $ "Attempt to access a property on an unchangeable non-property type"
       newTypeRef $ Unbound NoRestriction
     (Unbound NoRestriction, _) -> do
@@ -412,7 +411,7 @@ makePointer errF r = do
   res <- fullReadType r
   case res of
     (PointerT innerTref, _) -> return innerTref
-    (_, Unchangeable) -> do
+    (_, Unchangeable _) -> do
       addError . errF $ "Attempt to make an unchangeable non-pointer type value into a pointer"
       newTypeRef (Unbound NoRestriction)
     (Unbound NoRestriction, _) -> do
@@ -428,7 +427,7 @@ makeBool errF r = do
   res <- fullReadType r
   case res of
     (BoolT, _) -> return ()
-    (_, Unchangeable) -> addError . errF $ "Attempt to make an unchangeable non-bool type value into a bool"
+    (_, Unchangeable _) -> addError . errF $ "Attempt to make an unchangeable non-bool type value into a bool"
     (Unbound NoRestriction, _) -> writeTypeRef r BoolT
     (t, _) -> addError . errF $ "Type " ++ show t ++ " does not unify with a bool"
 
@@ -465,15 +464,19 @@ convertFuncSig restrs inTs outTs = do
 
   forM_ restrs $ \(n, restr) -> use (typeVariables . at n) >>= \mT -> case mT of
     Nothing -> addError . ErrorString $ "(Incorrect funcsig) Restriction " ++ show restr ++ " applied on unknown type variable " ++ n
-    Just tref -> void $ convertRestriction restr >>= \restr' -> restrict errF restr' tref
+    Just tref -> void $ convertRestriction restr >>= \restr' -> forceRestrict errF restr' tref
       where errF m = ErrorString $ "(Incorrect funcsig) Could not apply restriction " ++ show restr ++ " to type variable " ++ n ++ ". " ++ show m
 
   newTypeVars <- typeVariables <<.= prevTypeVars
   (, newTypeVars) <$> newTypeRef (FunctionT inTs' outTs')
   where
+    forceRestrict errF restr tref = do
+      (t, _) <- fullReadType tref
+      applyRestriction errF Changeable (tref, t) restr
+      return tref
     defineTypeVars = mapM_ defineTypeVar typeVarNames
-    defineTypeVar n = newTypeRef (Unbound NoRestriction) >>= (typeVariables . at n ?=)
-    typeVarNames = S.toList . S.fromList $ [n | Ast.NamedT n@(c:_) [] <- inTs ++ outTs >>= universe, isLower c]
+    defineTypeVar n = newTypeVar n >>= (typeVariables . at n ?=)
+    typeVarNames = S.toList . S.fromList $ [n | Ast.NamedT n@(c:_) [] <- inTs ++ outTs >>= universe, isLower c] ++ map fst restrs
 
 convertRestriction :: Ast.Restriction -> Inferrer s (Restriction s)
 convertRestriction NoRestriction = return NoRestriction
@@ -484,6 +487,9 @@ convertRestriction (PropertiesR ps) = PropertiesR <$> mapM propConvert ps
 
 newTypeRef :: Inferred s -> Inferrer s (TypeRef s)
 newTypeRef = lift . newSTRef . (, Changeable)
+
+newTypeVar :: String -> Inferrer s (TypeRef s)
+newTypeVar n = lift . newSTRef $ (Unbound NoRestriction, Unchangeable n)
 
 writeTypeRef :: TypeRef s -> Inferred s -> Inferrer s ()
 writeTypeRef r t = lift $ modifySTRef r (_1 .~ t)
@@ -502,7 +508,7 @@ fullReadType r = liftM snd $ lift (readSTRef r) >>= recurse [] r
           res@(newRef, _) <- lift (readSTRef t) >>= recurse (t : path) t
           lift $ writeSTRef ref (Link newRef, Changeable)
           return res
-    recurse _ _ (Link _, Unchangeable) = error "Should be impossible, an unchangeable type with a link"
+    recurse _ _ (Link _, Unchangeable _) = error "Should be impossible, an unchangeable type with a link"
     recurse _ ref res = return (ref, res)
 
 pointingToSame :: TypeRef s -> TypeRef s -> Inferrer s Bool
@@ -517,8 +523,10 @@ pointingToSame r1 r2 = do
 recursiveMakeUnchangeable :: TypeRef s -> Inferrer s (TypeRef s)
 recursiveMakeUnchangeable ref = inner ref >> return ref
   where
-    inner r = setChangeable r Unchangeable >> readTypeRef r >>= recurse
-    setChangeable r b = lift $ modifySTRef r (_2 .~ b)
+    inner r = setUnchangeable r >> readTypeRef r >>= recurse
+    setUnchangeable r = lift $ modifySTRef r change
+    change t@(_, Unchangeable _) = t
+    change (t, Changeable) = (t, Unchangeable "unnamed")
     recurse t = case t of
       NamedT _ rs -> mapM_ inner rs
       PointerT r -> inner r
