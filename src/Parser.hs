@@ -109,7 +109,7 @@ varInit :: Parser Statement
 varInit = withPosition (VarInit <$> mutable <*> identifier <*> typeAnno <*> value) <?> "var init"
   where
     mutable = option False $ replace reserved "mut" True
-    typeAnno = reservedOp ":" >> option UnknownT typeLiteral
+    typeAnno = char ':' >> whiteSpace >> option UnknownT typeLiteral
     value = option (Zero UnknownT) $ reservedOp "=" >> expression
 
 expression :: Parser Expression
