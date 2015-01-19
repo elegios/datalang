@@ -54,12 +54,21 @@ generateExpression (Subscript chunk index _) = do
   boolean return toImmutable mutable (elementOp, innerT, True)
 
 generateExpression (ExprLit lit _) = case lit of
-  ILit val t _ -> return (ConstantOperand $ C.Int size val, t, False)
-    where size = getSize t
-  FLit val t _ -> return (ConstantOperand . C.Float $ F.Double val, t, False)
+  ILit val t _ -> do
+    t' <- ensureTopNotNamed t
+    return (ConstantOperand $ C.Int (getSize t') val, t', False)
+  FLit val t _ -> do
+    t' <- ensureTopNotNamed t
+    return (ConstantOperand . C.Float $ F.Double val, t', False)
   BLit val _ -> return (ConstantOperand . C.Int 1 $ boolean 1 0 val, BoolT, False)
-  Null t _ -> toLLVMType False t >>= \llvmt -> return (ConstantOperand $ C.Null llvmt, t, False)
-  Undef t _ -> toLLVMType False t >>= \llvmt -> return (ConstantOperand $ C.Undef llvmt, t, False)
+  Null t _ -> do
+    llvmt <- toLLVMType False t
+    t' <- ensureTopNotNamed t
+    return (ConstantOperand $ C.Null llvmt, t', False)
+  Undef t _ -> do
+    llvmt <- toLLVMType False t
+    t' <- ensureTopNotNamed t
+    return (ConstantOperand $ C.Undef llvmt, t', False)
 
 generateExpression (ExprFunc fName expressions t _) = do
   ops <- mapM (generateExpression >=> toImmutable) expressions
@@ -67,7 +76,7 @@ generateExpression (ExprFunc fName expressions t _) = do
   funcOp <- requestFunction $ ExprSig fName (opType <$> ops) retty
   llvmtype <- toLLVMType False t
   retOp <- instr (Call False CC.C [] funcOp (zip (opOp <$> ops) $ repeat []) [] [], llvmtype)
-  return (retOp, t, False)
+  return (retOp, retty, False)
 
 generateExpression (Un Deref expression _) = do
   (expOp, PointerT t, mutable) <- generateExpression expression

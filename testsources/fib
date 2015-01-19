@@ -1,17 +1,35 @@
 func fib {
-  nT num
-  cT num
+  t int
 }
-nT -> cT
-n -> c {
+t -> t
+n -> b {
+  b = 1
   mut a := 1
-  mut b := 1
-  c = 1
-  n = n - 2
-  while n > 0 {
+  mut index := n - 2
+  while index > 0 {
+    defer index = index - 1
     next := a + b
     a = b
-    b = c
-    c = next
+    b = next
   }
+}
+
+func fibSlow {
+  t int
+}
+t -> t
+n -> b {
+  if n <= 2 {
+    b = 1
+    return
+  }
+  b = fibSlow(n-1) + fibSlow(n-2)
+}
+
+func main {
+  rType int
+}
+-> rType
+-> ret {
+  fibSlow(45)(ret)
 }

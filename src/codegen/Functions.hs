@@ -7,10 +7,13 @@ import CodeGen.Basics
 import CodeGen.FuncGen
 import CodeGen.Statements
 import CodeGen.Expressions
+import Data.Char (isLower)
 import Data.Maybe
 import Data.Functor ((<$>))
 import Control.Lens hiding (op, index, parts, transform)
 import Control.Monad.State (get, put)
+import Control.Monad
+import Control.Monad.Except (throwError)
 import LLVM.General.AST.Operand
 import LLVM.General.AST.Name
 import LLVM.General.AST.Global
@@ -20,7 +23,7 @@ import qualified LLVM.General.AST as AST
 import qualified Data.Map as M
 
 initialFuncState :: GenState -> FuncState
-initialFuncState currGenState = FuncState currGenState Nothing Nothing (Ret Nothing []) M.empty 0 [] entryBlock (Defers [] [] [])
+initialFuncState currGenState = FuncState currGenState Nothing Nothing (Ret Nothing []) M.empty M.empty 0 [] entryBlock (Defers [] [] [])
   where entryBlock = BasicBlock (Name "entry") [] . Do $ Ret Nothing []
 
 generateFunction :: FuncSig -> CodeGen (Either ErrorMessage AST.Definition)
@@ -28,7 +31,10 @@ generateFunction sig@(NormalSig fName inTs outTs) = do
   currGenState <- get
   let generateBody = do
         mFunc <- uses (genState. source . to functionDefinitions) $ M.lookup fName
-        (FuncDef _ _ _ innames outnames stmnt _) <- justErr (ErrorString $ "Function " ++ fName ++ " not found") mFunc
+        (FuncDef inTSpec outTSpec _ innames outnames stmnt _) <- justErr (ErrorString $ "Function " ++ fName ++ " not found") mFunc
+
+        zipWithM_ defineTypeVariable inTs inTSpec
+        zipWithM_ defineTypeVariable outTs outTSpec
 
         (initLocals, params) <- generateInitialFunctionLocals innames inTs outnames outTs
         locals .= initLocals
@@ -41,13 +47,16 @@ generateFunction sig@(NormalSig fName inTs outTs) = do
 
 generateFunction sig@(ExprSig fName inTs outT) = do
   currGenState <- get
-  let initState = FuncState currGenState Nothing Nothing (Br (Name "returnBlock") []) M.empty 0 [] entryBlock (Defers [] [] [])
+  let initState = FuncState currGenState Nothing Nothing (Br (Name "returnBlock") []) M.empty M.empty 0 [] entryBlock (Defers [] [] [])
       entryBlock = BasicBlock (Name "entry") [] . Do $ Br (Name "returnBlock") []
       retBlock = BasicBlock (Name "returnBlock") [] . Do $ Ret Nothing []
       generateBody = do
-        (FuncDef _ _ _ innames [outname] stmnt sr) <-
+        (FuncDef inTSpec [outTSpec] _ innames [outname] stmnt sr) <-
           use (genState . source . to functionDefinitions . at fName)
           >>= justErr (ErrorString $ "Function " ++ fName ++ " not found")
+
+        zipWithM_ defineTypeVariable inTs inTSpec
+        defineTypeVariable outT outTSpec
 
         (initLocals, params) <- generateInitialFunctionLocals innames inTs [] []
         locals .= initLocals
@@ -88,3 +97,19 @@ constructFunctionDeclaration sig params retty = do
     , basicBlocks = reverse blocks
     , returnType = retty
     }
+
+defineTypeVariable :: Type -> Type -> FuncGen ()
+defineTypeVariable t (NamedT n@(c:_) []) | isLower c = typeVariables . at n ?= t
+defineTypeVariable (StructT ps1) (StructT ps2)
+  | ps1names == ps2names = zipWithM_ defineTypeVariable ps1ts ps2ts
+  where
+    ps1names = map fst ps1
+    ps2names = map fst ps2
+    ps1ts = map snd ps1
+    ps2ts = map snd ps2
+defineTypeVariable (PointerT t1) (PointerT t2) = defineTypeVariable t1 t2
+defineTypeVariable (NamedT n1 ts1) (NamedT n2 ts2)
+  | n1 == n2 = zipWithM_ defineTypeVariable ts1 ts2
+defineTypeVariable t1 t2
+  | t1 == t2 = return ()
+  | otherwise = throwError . ErrorString $ "Could not define all typevariables, " ++ show t1 ++ " and " ++ show t2 ++ " should have been equal"

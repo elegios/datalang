@@ -6,6 +6,7 @@ import Ast
 import CodeGen.Basics
 import Data.Maybe
 import Data.Functor ((<$>))
+import Data.Char (isUpper)
 import Data.List
 import Data.Word
 import Data.Generics.Uniplate.Data
@@ -27,6 +28,7 @@ data FuncState = FuncState
   , _continueTarget :: Maybe Name
   , _retTerminator :: Terminator
   , _locals :: M.Map String FuncGenOperand
+  , _typeVariables :: M.Map String Type
   , _nextFresh :: Word
   , _finalizedBlocks :: [BasicBlock]
   , _currentBlock :: BasicBlock
@@ -104,7 +106,7 @@ toFunctionParams inTs outTs = mapM (uncurry toLLVMType) $ ins ++ outs
     outs = zip (repeat True) outTs
 
 ensureTopNotNamed :: Type -> FuncGen Type
-ensureTopNotNamed (NamedT tName ts) = do
+ensureTopNotNamed (NamedT tName@(c:_) ts) | isUpper c = do
   mType <- uses (genState . source) $ M.lookup tName . typeDefinitions
   case mType of
     Nothing -> throwError . ErrorString $ "Unknown type " ++ tName
@@ -113,6 +115,9 @@ ensureTopNotNamed (NamedT tName ts) = do
         translation = M.fromList $ zip tNames ts
         replaceParamTypes x@(NamedT innerTName []) = fromMaybe x $ M.lookup innerTName translation
         replaceParamTypes x = x
+ensureTopNotNamed (NamedT tName []) =
+  use (typeVariables . at tName) >>= maybe err ensureTopNotNamed
+  where err = throwError . ErrorString $ "Unknown typevariable " ++ tName
 ensureTopNotNamed x = return x
 
 toLLVMType :: Bool -> Type -> FuncGen T.Type
@@ -169,6 +174,10 @@ continueTarget inj g = (\ct -> g { _continueTarget = ct }) <$> inj (_continueTar
 locals :: Functor f => (M.Map String FuncGenOperand -> f (M.Map String FuncGenOperand)) -> FuncState -> f FuncState
 locals inj g = (\locs -> g { _locals = locs }) <$> inj (_locals g)
 {-# INLINE locals #-}
+
+typeVariables :: Functor f => (M.Map String Type -> f (M.Map String Type)) -> FuncState -> f FuncState
+typeVariables inj g = (\locs -> g { _typeVariables = locs }) <$> inj (_typeVariables g)
+{-# INLINE typeVariables #-}
 
 retTerminator :: Functor f => (Terminator -> f Terminator) -> FuncState -> f FuncState
 retTerminator inj g = (\locs -> g { _retTerminator = locs }) <$> inj (_retTerminator g)

@@ -1,5 +1,7 @@
-func main
--> I32
+func main {
+  rType int
+}
+-> rType
 -> ret {
   ret = 0
   mut extra := 0

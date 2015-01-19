@@ -22,6 +22,7 @@ type UnifyError = String
 type UnifyErrorFunction = UnifyError -> ErrorMessage
 
 data Changeable = Changeable | Unchangeable String deriving Eq
+data TypeVarTarget = Environment | Unbounds deriving Eq
 
 data ErrorMessage = ErrorString String deriving Show
 data InferrerState s = InferrerState
@@ -68,8 +69,7 @@ infer funcs errs def = runST $ convertOutput <$> runStateT inference initState
 
 enterInfer :: FuncDefT Ast.Type -> Inferrer s (FuncDefT (TypeRef s))
 enterInfer inDef = do
-  (ftref, typeVars) <- convertFuncSig restrs inTs outTs
-  typeVariables .= typeVars
+  ftref <- convertFuncSig restrs inTs outTs Environment
   FunctionT inTs' outTs' <- recursiveMakeUnchangeable ftref >>= readTypeRef
   zipWithM_ defineLocal (ins ++ outs) (inTs' ++ outTs')
   body' <- enterStatement body
@@ -289,7 +289,7 @@ unifyExternalFunction fName inTs outTs sr = do
   case mFunc of
     Nothing -> addError . ErrorString $ "Unknown function " ++ fName ++ " at " ++ show sr
     Just (Ast.FuncDef funcInTs funcOutTs restrs _ _ _ _) -> do
-      FunctionT funcInTs' funcOutTs' <- convertFuncSig restrs funcInTs funcOutTs >>= readTypeRef . fst
+      FunctionT funcInTs' funcOutTs' <- convertFuncSig restrs funcInTs funcOutTs Unbounds >>= readTypeRef
       when (length funcInTs /= length inTs) . addError . ErrorString $ "Wrong number of in arguments at " ++ show sr
       when (length funcOutTs /= length outTs) . addError . ErrorString $ "Wrong number of out arguments at " ++ show sr
       zipWithM_ (unify errF) funcInTs' inTs
@@ -298,17 +298,20 @@ unifyExternalFunction fName inTs outTs sr = do
     errF m = ErrorString $ "Type mismatch in function argument at " ++ show sr ++ ": " ++ show m -- TODO: report which argument
 
 unify :: UnifyErrorFunction -> TypeRef s -> TypeRef s -> Inferrer s (TypeRef s)
-unify errF r1 r2 = pointingToSame r1 r2 >>= boolean (return r1) (do
-  (t1, r1c) <- fullReadType r1
-  (t2, r2c) <- fullReadType r2
-  case (r1c, r2c) of
-    (Unchangeable _, Unchangeable _) | t1 /= t2 -> -- NOTE: Unchangeable types are constructed in such a way that equivalent types have the same references, thus this works
-      addError . errF $ "Attempt to unify two unchangeable type values (" ++ show t1 ++ " and " ++ show t2 ++ ")"
-    (Unchangeable _, Unchangeable _) -> return ()
-    (u@(Unchangeable _), _) -> forceUnify errF u (r1, t1) (r2, t2)
-    (_, u@(Unchangeable _)) -> forceUnify errF u (r2, t2) (r1, t1)
-    _ -> forceUnify errF Changeable (r1, t1) (r2, t2)
-  return r1)
+unify errF ref1 ref2 = do
+  r1 <- bottomRef ref1
+  r2 <- bottomRef ref2
+  if r1 == r2 then return r1 else do
+    (t1, r1c) <- fullReadType r1
+    (t2, r2c) <- fullReadType r2
+    case (r1c, r2c) of
+      (Unchangeable _, Unchangeable _) | t1 /= t2 -> -- NOTE: Unchangeable types are constructed in such a way that equivalent types have the same references, thus this works
+        addError . errF $ "Attempt to unify two unchangeable type values (" ++ show t1 ++ " and " ++ show t2 ++ ")"
+      (Unchangeable _, Unchangeable _) -> return ()
+      (u@(Unchangeable _), _) -> forceUnify errF u (r1, t1) (r2, t2)
+      (_, u@(Unchangeable _)) -> forceUnify errF u (r2, t2) (r1, t1)
+      _ -> forceUnify errF Changeable (r1, t1) (r2, t2)
+    return r1
 
 -- FIXME: Beginning of code to check for impact of NamedT (The functions herein need to read through the name) {
 
@@ -455,8 +458,8 @@ convert t = case t of
       Ast.BoolT -> BoolT
       Ast.UnknownT -> Unbound NoRestriction
 
-convertFuncSig :: [(String, Ast.Restriction)] -> [Ast.Type] -> [Ast.Type] -> Inferrer s (TypeRef s, M.Map String (TypeRef s))
-convertFuncSig restrs inTs outTs = do
+convertFuncSig :: [(String, Ast.Restriction)] -> [Ast.Type] -> [Ast.Type] -> TypeVarTarget -> Inferrer s (TypeRef s)
+convertFuncSig restrs inTs outTs target = do
   prevTypeVars <- typeVariables <<.= M.empty
   defineTypeVars
   inTs' <- mapM convert inTs
@@ -467,15 +470,18 @@ convertFuncSig restrs inTs outTs = do
     Just tref -> void $ convertRestriction restr >>= \restr' -> forceRestrict errF restr' tref
       where errF m = ErrorString $ "(Incorrect funcsig) Could not apply restriction " ++ show restr ++ " to type variable " ++ n ++ ". " ++ show m
 
-  newTypeVars <- typeVariables <<.= prevTypeVars
-  (, newTypeVars) <$> newTypeRef (FunctionT inTs' outTs')
+  case target of
+    Environment -> typeVariables %= M.union prevTypeVars
+    Unbounds -> typeVariables .= prevTypeVars
+
+  newTypeRef (FunctionT inTs' outTs')
   where
     forceRestrict errF restr tref = do
       (t, _) <- fullReadType tref
       applyRestriction errF Changeable (tref, t) restr
       return tref
     defineTypeVars = mapM_ defineTypeVar typeVarNames
-    defineTypeVar n = newTypeVar n >>= (typeVariables . at n ?=)
+    defineTypeVar n = newTypeVar n target >>= (typeVariables . at n ?=)
     typeVarNames = S.toList . S.fromList $ [n | Ast.NamedT n@(c:_) [] <- inTs ++ outTs >>= universe, isLower c] ++ map fst restrs
 
 convertRestriction :: Ast.Restriction -> Inferrer s (Restriction s)
@@ -488,8 +494,9 @@ convertRestriction (PropertiesR ps) = PropertiesR <$> mapM propConvert ps
 newTypeRef :: Inferred s -> Inferrer s (TypeRef s)
 newTypeRef = lift . newSTRef . (, Changeable)
 
-newTypeVar :: String -> Inferrer s (TypeRef s)
-newTypeVar n = lift . newSTRef $ (Unbound NoRestriction, Unchangeable n)
+newTypeVar :: String -> TypeVarTarget -> Inferrer s (TypeRef s)
+newTypeVar n Environment = lift . newSTRef $ (Unbound NoRestriction, Unchangeable n)
+newTypeVar _ Unbounds = lift . newSTRef $ (Unbound NoRestriction, Changeable)
 
 writeTypeRef :: TypeRef s -> Inferred s -> Inferrer s ()
 writeTypeRef r t = lift $ modifySTRef r (_1 .~ t)
@@ -511,14 +518,11 @@ fullReadType r = liftM snd $ lift (readSTRef r) >>= recurse [] r
     recurse _ _ (Link _, Unchangeable _) = error "Should be impossible, an unchangeable type with a link"
     recurse _ ref res = return (ref, res)
 
-pointingToSame :: TypeRef s -> TypeRef s -> Inferrer s Bool
-pointingToSame r1 r2 = do
-  tref1 <- lift (readSTRef r1) >>= recurse r1
-  tref2 <- lift (readSTRef r2) >>= recurse r2
-  return $ tref1 == tref2
+bottomRef :: TypeRef s -> Inferrer s (TypeRef s)
+bottomRef ref = lift (readSTRef ref) >>= recurse ref
   where
-    recurse _ (Link t, Changeable) = lift (readSTRef t) >>= recurse t
-    recurse ref _ = return ref
+    recurse _ (Link r, Changeable) = lift (readSTRef r) >>= recurse r
+    recurse r _ = return r
 
 recursiveMakeUnchangeable :: TypeRef s -> Inferrer s (TypeRef s)
 recursiveMakeUnchangeable ref = inner ref >> return ref
@@ -559,9 +563,3 @@ typeVariables inj g = (\vars -> g { _typeVariables = vars }) <$> inj (_typeVaria
 functions :: Functor f => (M.Map String Ast.FuncDef -> f (M.Map String Ast.FuncDef)) -> InferrerState s -> f (InferrerState s)
 functions inj g = (\vars -> g { _functions = vars }) <$> inj (_functions g)
 {-# INLINE functions #-}
-
-
--- helpers TODO: move elsewhere
-boolean :: a -> a -> Bool -> a
-boolean a _ True = a
-boolean _ a False = a
