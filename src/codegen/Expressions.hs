@@ -1,11 +1,12 @@
 {-# LANGUAGE TupleSections #-}
 
-module CodeGen.Expressions where
+module CodeGen.Expressions (generateExpression, toImmutable) where
 
 import Ast
 import CodeGen.FuncGen
 import CodeGen.Basics
 import Data.Functor ((<$>))
+import Data.Word (Word32)
 import Control.Lens hiding (op, index, parts, transform)
 import Control.Monad.Except
 import LLVM.General.AST.Operand
@@ -102,10 +103,8 @@ generateExpression (Un operator expression _) = do
   where
     zero t = if isFloat t
       then ConstantOperand . C.Float $ F.Double 0
-      else ConstantOperand $ C.Int size 0
-      where size = getSize t
-    one t = ConstantOperand $ C.Int size 0
-      where size = getSize t
+      else ConstantOperand $ C.Int (getSize t) 0
+    one t = ConstantOperand $ C.Int (getSize t) 0 -- FIXME: examine the correctness of this
 
 generateExpression (Bin operator exp1 exp2 sr) = do
   res1@(_, t1, _) <- generateExpression exp1 >>= toImmutable
@@ -229,3 +228,20 @@ toImmutable res@(_, _, False) = return res
 toImmutable (op, t, True) = do
   llvmtype <- toLLVMType False t
   (, t, False) <$> instr (Load False op Nothing 0 [], llvmtype)
+
+isFloat :: Type -> Bool
+isFloat (FloatT _) = True
+isFloat _ = False
+
+isUnsigned :: Type -> Bool
+isUnsigned (UIntT _) = True
+isUnsigned _ = False
+
+isNum :: Type -> Bool
+isNum (IntT _) = True
+isNum n = isFloat n || isUnsigned n
+
+getSize :: Type -> Word32
+getSize (IntT s) = sizeToWord32 s
+getSize (UIntT s) = sizeToWord32 s
+getSize (FloatT s) = sizeToWord32 s

@@ -1,6 +1,6 @@
 {-# LANGUAGE TupleSections #-}
 
-module CodeGen.Statements where
+module CodeGen.Statements (generateStatement) where
 
 import Ast
 import CodeGen.Basics

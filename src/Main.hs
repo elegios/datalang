@@ -20,7 +20,6 @@ import LLVM.General.Analysis
 import Control.Monad.Except (runExceptT, ExceptT(..))
 import Control.Monad (unless)
 
--- FIXME: codegen cannot handle typevars, add lookup for them or something
 main :: IO ()
 main = do
   sourceFile : _ <- getArgs

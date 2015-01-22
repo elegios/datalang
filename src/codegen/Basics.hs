@@ -1,3 +1,5 @@
+{-# LANGUAGE TemplateHaskell #-}
+
 module CodeGen.Basics where
 
 import Ast
@@ -16,6 +18,8 @@ type CodeGen a = StateT GenState Identity a
 
 type GenFuncs = M.Map FuncSig CallableOperand
 
+data ErrorMessage = ErrorString String deriving Show
+
 data GenState = GenState
   { _generated :: GenFuncs
   , _requested :: GenFuncs
@@ -25,13 +29,10 @@ data GenState = GenState
   , _source :: Source
   }
 
-data ErrorMessage = ErrorString String deriving Show
+makeLenses ''GenState
 
 runCodeGen :: GenState -> CodeGen a -> (a, GenState)
 runCodeGen initState = runIdentity . flip runStateT initState
-
-emptyState :: GenFuncs -> Source -> GenState
-emptyState reqs = GenState M.empty reqs M.empty M.empty []
 
 -- General helpers, should perhaps be moved (TODO)
 boolean :: a -> a -> Bool -> a
@@ -44,74 +45,9 @@ justErr err Nothing = throwError err
 
 -- Helpers
 
-isFloat :: Type -> Bool
-isFloat (FloatT _) = True
-isFloat _ = False
-
-isUnsigned :: Type -> Bool
-isUnsigned (UIntT _) = True
-isUnsigned _ = False
-
-isNum :: Type -> Bool
-isNum (IntT _) = True
-isNum n = isFloat n || isUnsigned n
-
-typeMap :: M.Map Type T.Type
-typeMap = M.fromList
-  [ (IntT S8, T.i8)
-  , (IntT S16, T.i16)
-  , (IntT S32, T.i32)
-  , (IntT S64, T.i64)
-
-  , (UIntT S8, T.i8)
-  , (UIntT S16, T.i16)
-  , (UIntT S32, T.i32)
-  , (UIntT S64, T.i64)
-
-  , (FloatT S32, T.float)
-  , (FloatT S64, T.double)
-
-  , (BoolT, T.i1)
-  ]
-
-getSize :: Type -> Word32
-getSize (IntT s) = sizeToWord32 s
-getSize (UIntT s) = sizeToWord32 s
-getSize (FloatT s) = sizeToWord32 s
-
 sizeToWord32 :: TSize -> Word32
-sizeToWord32 S8 = 8
-sizeToWord32 S16 = 16
-sizeToWord32 S32 = 32
-sizeToWord32 S64 = 64
-
-extractNameFromCallableOperand :: CallableOperand -> AST.Name
-extractNameFromCallableOperand (Right (ConstantOperand (C.GlobalReference _ n))) = n
-
--- Lenses
-generated :: Functor f => (GenFuncs -> f GenFuncs) -> GenState -> f GenState
-generated inj state = (\gen -> state { _generated = gen }) <$> inj (_generated state)
-{-# INLINE generated #-}
-
-requested :: Functor f => (GenFuncs -> f GenFuncs) -> GenState -> f GenState
-requested inj state = (\req -> state { _requested = req }) <$> inj (_requested state)
-{-# INLINE requested #-}
-
-nextNameNumber :: Functor f => (M.Map String Int -> f (M.Map String Int)) -> GenState -> f GenState
-nextNameNumber inj state = (\nn -> state { _nextNameNumber = nn }) <$> inj (_nextNameNumber state)
-{-# INLINE nextNameNumber #-}
-
-structTypes :: Functor f => (M.Map [Type] (AST.Definition, T.Type) -> f (M.Map [Type] (AST.Definition, T.Type))) -> GenState -> f GenState
-structTypes inj state = (\st -> state { _structTypes = st }) <$> inj (_structTypes state)
-{-# INLINE structTypes #-}
-
-source :: Functor f => (Source -> f Source) -> GenState -> f GenState
-source inj g = (\s -> g { _source = s }) <$> inj (_source g)
-{-# INLINE source #-}
-
-errors :: Functor f => ([ErrorMessage] -> f [ErrorMessage]) -> GenState -> f GenState
-errors inj g = (\errs -> g { _errors = errs }) <$> inj (_errors g)
-{-# INLINE errors #-}
+sizeToWord32 s = case s of
+  S8 -> 8; S16 -> 16; S32 -> 32; S64 -> 64
 
 -- manual lenses
 

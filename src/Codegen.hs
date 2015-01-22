@@ -5,8 +5,6 @@ module CodeGen
 , GenFuncs
 ) where
 
--- TODO: Save a "stack trace" of requested functions, to make it easier to figure out why a specific function was requested.
-
 import Ast
 import CodeGen.Functions
 import CodeGen.Basics
@@ -20,6 +18,7 @@ generate sourceToGen requests = case errs of
   [] -> Right $ AST.defaultModule { AST.moduleDefinitions = structDefs ++ defs }
   _ -> Left errs
   where
+    emptyState reqs = GenState M.empty reqs M.empty M.empty []
     (defs, resState) = runCodeGen (emptyState requests sourceToGen) generateFunctions
     errs = _errors resState
     structDefs = map fst . M.elems $ _structTypes resState

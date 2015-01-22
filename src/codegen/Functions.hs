@@ -1,6 +1,6 @@
 {-# LANGUAGE TupleSections #-}
 
-module CodeGen.Functions where
+module CodeGen.Functions (generateFunction) where
 
 import Ast
 import CodeGen.Basics
@@ -19,6 +19,7 @@ import LLVM.General.AST.Name
 import LLVM.General.AST.Global
 import LLVM.General.AST.Instruction as I hiding (condition, index)
 import qualified LLVM.General.AST.Type as T
+import qualified LLVM.General.AST.Constant as C
 import qualified LLVM.General.AST as AST
 import qualified Data.Map as M
 
@@ -90,13 +91,14 @@ constructFunctionDeclaration :: FuncSig -> [Parameter] -> T.Type -> FuncGen AST.
 constructFunctionDeclaration sig params retty = do
   use currentBlock >>= finalizeBlock
   blocks <- use finalizedBlocks
-  mOpName <- uses (genState . requested . at sig) $ fmap extractNameFromCallableOperand
+  mOpName <- uses (genState . requested . at sig) $ fmap extractName
   return . AST.GlobalDefinition $ functionDefaults
     { name = fromJust mOpName
     , parameters = (params, False)
     , basicBlocks = reverse blocks
     , returnType = retty
     }
+  where extractName (Right (ConstantOperand (C.GlobalReference _ n))) = n
 
 defineTypeVariable :: Type -> Type -> FuncGen ()
 defineTypeVariable t (NamedT n@(c:_) []) | isLower c = typeVariables . at n ?= t

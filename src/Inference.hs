@@ -1,4 +1,4 @@
-{-# LANGUAGE TupleSections, TypeSynonymInstances, FlexibleInstances #-}
+{-# LANGUAGE TupleSections, TypeSynonymInstances, FlexibleInstances, TemplateHaskell #-}
 
 module Inference (fullInfer, infer) where
 
@@ -52,6 +52,8 @@ type Restriction s = RestrictionT (TypeRef s)
 
 type Inferrer s a = StateT (InferrerState s) (ST s) a
 type TypeRef s = STRef s (Inferred s, Changeable)
+
+makeLenses ''InferrerState
 
 fullInfer :: Source -> ([ErrorMessage], Source)
 fullInfer source = (reverse errs, newSource)
@@ -545,21 +547,3 @@ addError err = errors %= (err :)
 
 buildReturn :: (t -> a, t -> b) -> t -> (a, b)
 buildReturn (a, b) t = (a t, b t)
-
--- Lenses
-
-errors :: Functor f => ([ErrorMessage] -> f [ErrorMessage]) -> InferrerState s -> f (InferrerState s)
-errors inj g = (\errs -> g { _errors = errs }) <$> inj (_errors g)
-{-# INLINE errors #-}
-
-variables :: Functor f => (M.Map String (TypeRef s) -> f (M.Map String (TypeRef s))) -> InferrerState s -> f (InferrerState s)
-variables inj g = (\vars -> g { _variables = vars }) <$> inj (_variables g)
-{-# INLINE variables #-}
-
-typeVariables :: Functor f => (M.Map String (TypeRef s) -> f (M.Map String (TypeRef s))) -> InferrerState s -> f (InferrerState s)
-typeVariables inj g = (\vars -> g { _typeVariables = vars }) <$> inj (_typeVariables g)
-{-# INLINE typeVariables #-}
-
-functions :: Functor f => (M.Map String Ast.FuncDef -> f (M.Map String Ast.FuncDef)) -> InferrerState s -> f (InferrerState s)
-functions inj g = (\vars -> g { _functions = vars }) <$> inj (_functions g)
-{-# INLINE functions #-}

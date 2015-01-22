@@ -1,4 +1,4 @@
-{-# LANGUAGE TupleSections #-}
+{-# LANGUAGE TupleSections, TemplateHaskell #-}
 
 module CodeGen.FuncGen where
 
@@ -44,6 +44,9 @@ data Defers = Defers
 type FuncGen a = StateT FuncState (ExceptT ErrorMessage Identity) a
 
 type FuncGenOperand = (Operand, Type, Bool)
+
+makeLenses ''FuncState
+makeLenses ''Defers
 
 runFuncGen :: FuncState -> FuncGen a -> Either ErrorMessage (a, FuncState)
 runFuncGen initState = runIdentity . runExceptT .  flip runStateT initState
@@ -139,9 +142,15 @@ toLLVMType mutable nt = ensureTopNotNamed nt >>= \t -> case t of
         genState . structTypes . at (snd <$> props) ?= (struct, llvmtype)
         return . boolean T.ptr id mutable $ llvmtype
   PointerT inner -> boolean T.ptr id mutable . T.ptr <$> toLLVMType False inner
-  _ -> boolean T.ptr id mutable <$> case M.lookup t typeMap of
-    Just llvmtype -> return llvmtype
-    Nothing -> throwError . ErrorString $ "Missed a case in the compiler, there is a type that cannot be converted to an LLVM type: " ++ show t
+  _ -> return . boolean T.ptr id mutable $ case t of
+    IntT s -> T.IntegerType $ sizeToWord32 s
+    UIntT s -> T.IntegerType $ sizeToWord32 s
+
+    FloatT S32 -> T.float
+    FloatT S64 -> T.double
+
+    BoolT -> T.i1
+    _ -> error $ "attempted to convert a basic type that might not have been so basic: " ++ show t ++ " (compiler error)"
 
 findMemberIndex :: String -> Type -> SourceRange -> FuncGen (Integer, Type)
 findMemberIndex mName (StructT fields) sr = case find (\(_, (n, _)) -> n == mName) $ zip [0..] fields of
@@ -158,61 +167,3 @@ opType :: FuncGenOperand -> Type
 opType (_, a, _) = a
 opMutable :: FuncGenOperand -> Bool
 opMutable (_, _, a) = a
-
--- Lenses
-
--- FuncState
-
-breakTarget :: Functor f => (Maybe Name -> f (Maybe Name)) -> FuncState -> f FuncState
-breakTarget inj g = (\bt -> g { _breakTarget = bt }) <$> inj (_breakTarget g)
-{-# INLINE breakTarget #-}
-
-continueTarget :: Functor f => (Maybe Name -> f (Maybe Name)) -> FuncState -> f FuncState
-continueTarget inj g = (\ct -> g { _continueTarget = ct }) <$> inj (_continueTarget g)
-{-# INLINE continueTarget #-}
-
-locals :: Functor f => (M.Map String FuncGenOperand -> f (M.Map String FuncGenOperand)) -> FuncState -> f FuncState
-locals inj g = (\locs -> g { _locals = locs }) <$> inj (_locals g)
-{-# INLINE locals #-}
-
-typeVariables :: Functor f => (M.Map String Type -> f (M.Map String Type)) -> FuncState -> f FuncState
-typeVariables inj g = (\locs -> g { _typeVariables = locs }) <$> inj (_typeVariables g)
-{-# INLINE typeVariables #-}
-
-retTerminator :: Functor f => (Terminator -> f Terminator) -> FuncState -> f FuncState
-retTerminator inj g = (\locs -> g { _retTerminator = locs }) <$> inj (_retTerminator g)
-{-# INLINE retTerminator #-}
-
-genState :: Functor f => (GenState -> f GenState) -> FuncState -> f FuncState
-genState inj g = (\bt -> g { _genState = bt }) <$> inj (_genState g)
-{-# INLINE genState #-}
-
-finalizedBlocks :: Functor f => ([BasicBlock] -> f [BasicBlock]) -> FuncState -> f FuncState
-finalizedBlocks inj g = (\fbs -> g { _finalizedBlocks = fbs }) <$> inj (_finalizedBlocks g)
-{-# INLINE finalizedBlocks #-}
-
-currentBlock :: Functor f => (BasicBlock -> f BasicBlock) -> FuncState -> f FuncState
-currentBlock inj g = (\cb -> g { _currentBlock = cb }) <$> inj (_currentBlock g)
-{-# INLINE currentBlock #-}
-
-nextFresh :: Functor f => (Word -> f Word) -> FuncState -> f FuncState
-nextFresh inj g = (\nf -> g { _nextFresh = nf }) <$> inj (_nextFresh g)
-{-# INLINE nextFresh #-}
-
-defers :: Functor f => (Defers -> f Defers) -> FuncState -> f FuncState
-defers inj g = (\nf -> g { _defers = nf }) <$> inj (_defers g)
-{-# INLINE defers #-}
-
--- Defers
-
-defersAll :: Functor f => ([Statement] -> f [Statement]) -> Defers -> f Defers
-defersAll inj g = (\nf -> g { _defersAll = nf }) <$> inj (_defersAll g)
-{-# INLINE defersAll #-}
-
-defersLoop :: Functor f => ([Statement] -> f [Statement]) -> Defers -> f Defers
-defersLoop inj g = (\nf -> g { _defersLoop = nf }) <$> inj (_defersLoop g)
-{-# INLINE defersLoop #-}
-
-defersScope :: Functor f => ([Statement] -> f [Statement]) -> Defers -> f Defers
-defersScope inj g = (\nf -> g { _defersScope = nf }) <$> inj (_defersScope g)
-{-# INLINE defersScope #-}
