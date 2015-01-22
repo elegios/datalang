@@ -31,8 +31,9 @@ generateFunction :: FuncSig -> CodeGen (Either ErrorMessage AST.Definition)
 generateFunction sig@(NormalSig fName inTs outTs) = do
   currGenState <- get
   let generateBody = do
-        mFunc <- uses (genState. source . to functionDefinitions) $ M.lookup fName
-        (FuncDef inTSpec outTSpec _ innames outnames stmnt _) <- justErr (ErrorString $ "Function " ++ fName ++ " not found") mFunc
+        (FuncDef inTSpec outTSpec _ innames outnames stmnt _) <-
+          use (genState . source . to functionDefinitions . at fName) >>=
+          justErr (ErrorString $ "Compiler error: Function " ++ fName ++ " not found")
 
         zipWithM_ defineTypeVariable inTs inTSpec
         zipWithM_ defineTypeVariable outTs outTSpec
@@ -54,7 +55,7 @@ generateFunction sig@(ExprSig fName inTs outT) = do
       generateBody = do
         (FuncDef inTSpec [outTSpec] _ innames [outname] stmnt sr) <-
           use (genState . source . to functionDefinitions . at fName)
-          >>= justErr (ErrorString $ "Function " ++ fName ++ " not found")
+          >>= justErr (ErrorString $ "Compiler error: Function " ++ fName ++ " not found")
 
         zipWithM_ defineTypeVariable inTs inTSpec
         defineTypeVariable outT outTSpec
@@ -114,4 +115,4 @@ defineTypeVariable (NamedT n1 ts1) (NamedT n2 ts2)
   | n1 == n2 = zipWithM_ defineTypeVariable ts1 ts2
 defineTypeVariable t1 t2
   | t1 == t2 = return ()
-  | otherwise = throwError . ErrorString $ "Could not define all typevariables, " ++ show t1 ++ " and " ++ show t2 ++ " should have been equal"
+  | otherwise = throwError . ErrorString $ "Compiler error: Could not define all typevariables, " ++ show t1 ++ " and " ++ show t2 ++ " should have been equal"

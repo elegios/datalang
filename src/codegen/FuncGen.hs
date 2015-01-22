@@ -112,7 +112,7 @@ ensureTopNotNamed :: Type -> FuncGen Type
 ensureTopNotNamed (NamedT tName@(c:_) ts) | isUpper c = do
   mType <- uses (genState . source) $ M.lookup tName . typeDefinitions
   case mType of
-    Nothing -> throwError . ErrorString $ "Unknown type " ++ tName
+    Nothing -> throwError . ErrorString $ "Compiler error: Unknown type " ++ tName
     Just (TypeDef tNames it _) -> return $ transform replaceParamTypes it
       where
         translation = M.fromList $ zip tNames ts
@@ -120,7 +120,7 @@ ensureTopNotNamed (NamedT tName@(c:_) ts) | isUpper c = do
         replaceParamTypes x = x
 ensureTopNotNamed (NamedT tName []) =
   use (typeVariables . at tName) >>= maybe err ensureTopNotNamed
-  where err = throwError . ErrorString $ "Unknown typevariable " ++ tName
+  where err = throwError . ErrorString $ "Compiler error: Unknown typevariable " ++ tName
 ensureTopNotNamed x = return x
 
 toLLVMType :: Bool -> Type -> FuncGen T.Type
@@ -150,16 +150,16 @@ toLLVMType mutable nt = ensureTopNotNamed nt >>= \t -> case t of
     FloatT S64 -> T.double
 
     BoolT -> T.i1
-    _ -> error $ "attempted to convert a basic type that might not have been so basic: " ++ show t ++ " (compiler error)"
+    _ -> error $ "Compiler error: attempted to convert a basic type that might not have been so basic: " ++ show t
 
 findMemberIndex :: String -> Type -> SourceRange -> FuncGen (Integer, Type)
 findMemberIndex mName (StructT fields) sr = case find (\(_, (n, _)) -> n == mName) $ zip [0..] fields of
   Just (i, (_, t)) -> return (i, t)
-  Nothing -> throwError . ErrorString $ "Unknown member field " ++ mName ++ " in struct at " ++ show sr
+  Nothing -> throwError . ErrorString $ "Compiler error: Unknown member field " ++ mName ++ " in struct at " ++ show sr
 findMemberIndex mName (Memorychunk iType _ _) _ = return . (, iType) $ case mName of
   "len" -> 0
   "cap" -> 1
-findMemberIndex _ _ sr = throwError . ErrorString $ "Attempt to access member field of non-struct type at " ++ show sr
+findMemberIndex _ _ sr = throwError . ErrorString $ "Compiler error: Attempt to access member field of non-struct type at " ++ show sr
 
 opOp :: FuncGenOperand -> Operand
 opOp (a, _, _) = a
