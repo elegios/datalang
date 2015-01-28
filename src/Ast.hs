@@ -1,9 +1,10 @@
-{-# LANGUAGE DeriveDataTypeable #-}
+{-# LANGUAGE FlexibleInstances, MultiParamTypeClasses #-}
 
 module Ast where
 
 import qualified Data.Map as M
-import Data.Data
+import Data.Functor ((<$>))
+import Data.Generics.Uniplate.Direct
 
 data SourceLoc = SourceLoc File Line Column deriving Show
 type File = String
@@ -27,7 +28,7 @@ data SourceT t = Source
 -- TODO: Constant support
 -- TODO: Function overloading and selection
 
-data TSize = S8 | S16 | S32 | S64 deriving (Show, Ord, Eq, Data, Typeable)
+data TSize = S8 | S16 | S32 | S64 deriving (Show, Ord, Eq)
 data Type = IntT TSize
           | UIntT TSize
           | FloatT TSize
@@ -37,13 +38,29 @@ data Type = IntT TSize
           | Memorychunk Type Bool Type
           | StructT [(String, Type)]
           | UnknownT
-          deriving (Show, Ord, Eq, Data, Typeable) -- TODO: Manual definition using uniplate.direct for speed
+          deriving (Show, Ord, Eq) -- TODO: Manual definition using uniplate.direct for speed
 data TypeDef = TypeDef [String] Type SourceRange deriving Show
 -- TODO: More fancy pointers
 -- TODO: Find and prevent infinite recursive structures
 -- TODO: Function types
 -- TODO: Strings
 -- TODO: Algebraic types (as tagged unions?)
+
+instance Uniplate Type where
+  uniplate (IntT s) = plate IntT |- s
+  uniplate (UIntT s) = plate UIntT |- s
+  uniplate (FloatT s) = plate FloatT |- s
+  uniplate BoolT = plate BoolT
+  uniplate (NamedT n ts) = plate NamedT |- n ||* ts
+  uniplate (PointerT t) = plate PointerT |* t
+  uniplate (Memorychunk it cap t) = plate Memorychunk |* it |- cap |* t
+  uniplate s@(StructT props) = plateProject from to s
+    where
+      from _ = snd <$> props
+      to = StructT . zip (fst <$> props)
+instance Biplate [Type] (Type) where
+    biplate (x:xs) = plate (:) |* x ||* xs
+    biplate x = plate x
 
 type Restriction = RestrictionT Type
 data RestrictionT t = NoRestriction

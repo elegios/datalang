@@ -9,7 +9,7 @@ import Data.Functor ((<$>))
 import Data.Char (isUpper)
 import Data.List
 import Data.Word
-import Data.Generics.Uniplate.Data
+import Data.Generics.Uniplate.Direct
 import Control.Lens hiding (op, index, parts, transform)
 import Control.Monad.State (runStateT, StateT, gets)
 import Control.Monad.Except
