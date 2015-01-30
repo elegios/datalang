@@ -10,7 +10,6 @@ import Control.Monad.State (runStateT, StateT)
 import Control.Monad.Except
 import LLVM.General.AST.Operand
 import qualified LLVM.General.AST.Type as T
-import qualified LLVM.General.AST.Constant as C
 import qualified LLVM.General.AST as AST
 import qualified Data.Map as M
 

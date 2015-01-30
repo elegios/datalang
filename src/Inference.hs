@@ -64,8 +64,8 @@ instance Uniplate (Inferred s) where
   uniplate (FunctionT its ots) = plate FunctionT ||* its ||* ots
   uniplate (Ref r) = plate Ref |- r
 instance Biplate [Inferred s] (Inferred s) where
-    biplate (x:xs) = plate (:) |* x ||* xs
-    biplate x = plate x
+  biplate (x:xs) = plate (:) |* x ||* xs
+  biplate x = plate x
 
 type Restriction s = RestrictionT (Inferred s)
 
