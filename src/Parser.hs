@@ -53,7 +53,7 @@ data Top = FunctionDefinition String FuncDef | TypeDefinition String TypeDef
 
 -- TODO: ensure 'try' is used in the right places
 topParser :: Parser [Top]
-topParser = whiteSpace >> many (funcDef <|> typeDef)
+topParser = whiteSpace >> many (funcDef <|> typeDef) <* eof
 
 funcDef :: Parser Top
 funcDef = withPosition $ reserved "func" >> makedef <$> identifier <*> def
@@ -146,7 +146,7 @@ binary :: String -> BinOp -> Operator StreamType StateType UnderlyingMonad Expre
 binary  name op = Infix (withPosition $ (\s e1 e2 -> Bin op e1 e2 s) <$ reservedOp name) AssocLeft
 
 prefix :: String -> UnOp -> Operator StreamType StateType UnderlyingMonad Expression
-prefix  name op = Prefix (withPosition $ flip (Un op) <$ reservedOp name)
+prefix name op = Prefix (withPosition $ flip (Un op) <$ reservedOp name)
 
 postfix :: String -> UnOp -> Operator StreamType StateType UnderlyingMonad Expression
 postfix name op = Postfix (withPosition $ flip (Un op) <$ reservedOp name)
@@ -182,10 +182,12 @@ numLit :: Parser (SourceRange -> Literal)
 numLit = either ILit FLit <$> naturalOrFloat <*> return UnknownT
 
 typeDef :: Parser Top
-typeDef = withPosition $ makedef <$> identifier <*> def
+typeDef = withPosition $ do
+  newType <- replace reserved "type" True <|> replace reserved "alias" False
+  makedef <$> identifier <*> def newType
   where
     makedef n d sr = TypeDefinition n $ d sr
-    def = TypeDef <$> typeParams <*> (try (reservedOp ":") >> typeLiteral)
+    def newType = TypeDef newType <$> typeParams <*> (reservedOp ":" >> typeLiteral)
     typeParams = option [] . angles $ commaSep1 identifier
 
 typeLiteral :: Parser Type

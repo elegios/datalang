@@ -8,6 +8,7 @@ import Data.STRef
 import Data.Tuple (swap)
 import Data.Char (isLower, isUpper)
 import Data.Generics.Uniplate.Direct
+import Data.Maybe (fromMaybe)
 import Control.Applicative ((<*>), (<*), getZipList, ZipList(..))
 import Control.Monad.ST
 import Control.Monad.State
@@ -15,8 +16,7 @@ import Control.Lens hiding (op, universe, plate)
 import qualified Ast
 import qualified Data.Map as M
 import qualified Data.Set as S
-
--- TODO: deal with named types, they are currently not correct
+import qualified Data.List as List
 
 type UnifyError = String
 type UnifyErrorFunction = UnifyError -> ErrorMessage
@@ -30,6 +30,8 @@ data InferrerState s = InferrerState
   , _variables :: M.Map String (Inferred s)
   , _typeVariables :: M.Map String (Inferred s)
   , _functions :: M.Map String Ast.FuncDef
+  , _typeDefs :: M.Map String Ast.TypeDef
+  , _equals :: [[Inferred s]]
   }
 
 -- TODO: support for typeclasses and similar stuff
@@ -37,7 +39,7 @@ data Inferred s = IntT TSize
                 | UIntT TSize
                 | FloatT TSize
                 | BoolT
-                | NamedT String [Inferred s]
+                | NamedT String [Inferred s] NewType (Inferred s)
                 | PointerT (Inferred s)
                 | MemorychunkT (Inferred s) Bool (Inferred s)
                 | StructT [(String, Inferred s)]
@@ -54,7 +56,7 @@ instance Uniplate (Inferred s) where
   uniplate (UIntT s) = plate UIntT |- s
   uniplate (FloatT s) = plate FloatT |- s
   uniplate BoolT = plate BoolT
-  uniplate (NamedT n ts) = plate NamedT |- n ||* ts
+  uniplate (NamedT n ts nt t) = plate NamedT |- n ||* ts |- nt |* t
   uniplate (PointerT t) = plate PointerT |* t
   uniplate (MemorychunkT it cap t) = plate MemorychunkT |* it |- cap |* t
   uniplate s@(StructT props) = plateProject fromStruct toStruct s
@@ -77,13 +79,14 @@ fullInfer :: Source -> ([ErrorMessage], Source)
 fullInfer source = (reverse errs, newSource)
   where
     funcs = functionDefinitions source
-    (errs, newFuncDefs) = M.mapAccum (infer funcs) [] funcs
+    types = typeDefinitions source
+    (errs, newFuncDefs) = M.mapAccum (infer funcs types) [] funcs
     newSource = source { functionDefinitions = newFuncDefs }
 
-infer :: M.Map String Ast.FuncDef -> [ErrorMessage] -> Ast.FuncDef -> ([ErrorMessage], Ast.FuncDef)
-infer funcs errs def = runST $ convertOutput <$> runStateT inference initState
+infer :: M.Map String Ast.FuncDef -> M.Map String Ast.TypeDef -> [ErrorMessage] -> Ast.FuncDef -> ([ErrorMessage], Ast.FuncDef)
+infer funcs types errs def = runST $ convertOutput <$> runStateT inference initState
   where
-    initState = InferrerState errs M.empty M.empty funcs
+    initState = InferrerState errs M.empty M.empty funcs types []
     inference = enterInfer def >>= exitInfer
     convertOutput = (_1 %~ view errors) . swap
 
@@ -295,7 +298,7 @@ convertBack errF inferred = case inferred of
       return Ast.UnknownT
     Unbound _ (Unchangeable n) -> return $ Ast.NamedT n []
     Link inf -> convertBack errF inf
-  NamedT n its -> Ast.NamedT n <$> mapM (convertBack errF) its
+  NamedT n its _ _ -> Ast.NamedT n <$> mapM (convertBack errF) its
   PointerT it -> Ast.PointerT <$> convertBack errF it
   MemorychunkT it1 cap it2 -> Ast.Memorychunk <$> convertBack errF it1 <*> return cap <*> convertBack errF it2
   StructT ps -> Ast.StructT <$> mapM propConvert ps
@@ -320,39 +323,8 @@ unifyExternalFunction fName inTs outTs sr = do
     errF inOut num m = ErrorString $ "Type mismatch in function " ++ inOut ++ " argument number " ++ show num ++  " at " ++ show sr ++ ": " ++ show m
     unifyArguments inOut ts' ts = sequence_ . getZipList $ unify <$> ZipList (errF inOut <$> [(1 :: Int)..]) <*> ZipList ts' <*> ZipList ts
 
--- FIXME: Beginning of code to check for impact of NamedT (The functions herein need to read through the name) {
-
 unify :: UnifyErrorFunction -> Inferred s -> Inferred s -> Inferrer s (Inferred s)
-unify errF t1 t2 = return t1 <* case (t1, t2) of
-  _ | t1 == t2 -> return ()
-  (Ref uncompressedR1, Ref uncompressedR2) -> do
-    r1 <- readRef uncompressedR1 >>= linkCompression uncompressedR1
-    r2 <- readRef uncompressedR2 >>= linkCompression uncompressedR2
-    unless (r1 == r2) $ do
-      pair <- (,) <$> readRef r1 <*> readRef r2
-      case pair of
-        (Unbound _ (Unchangeable n1), Unbound _ (Unchangeable n2)) -> addError . errF $ "Cannot unify differing typevariables " ++ n1 ++ " and " ++ n2
-        (Unbound restr Changeable, Unbound _ _) -> applyRestriction errF (Ref r2) restr >> writeRef r1 (Link $ Ref r2)
-        (Unbound _ _, Unbound restr Changeable) -> applyRestriction errF (Ref r1) restr >> writeRef r2 (Link $ Ref r1)
-        (_, Link t) -> unifyRef t r1
-        (Link t, _) -> unifyRef t r2
-  (Ref r, t) -> readRef r >>= linkCompression r >>= unifyRef t
-  (t, Ref r) -> readRef r >>= linkCompression r >>= unifyRef t
-  (NamedT n1 t1s, NamedT n2 t2s) | n1 == n2 -> zipWithM_ (unify errF) t1s t2s
-  -- (NamedT n ts, _) -> -- TODO: some form of instantiation of the NamedT and attempt to unify t2 with it. otherwise we can never write a literal of a named type
-  -- (_, NamedT n ts) -> -- TODO: here as well
-  (PointerT i1, PointerT i2) -> void $ unify errF i1 i2
-  (MemorychunkT r11 c1 r12, MemorychunkT r21 c2 r22) | c1 == c2 -> do
-    unify errF r11 r21
-    void $ unify errF r12 r22
-  (StructT p1, StructT p2) | p1names == p2names -> zipWithM_ (unify errF) p1types p2types
-    where
-      (p1names, p1types) = unzip p1
-      (p2names, p2types) = unzip p2
-  (FunctionT i1 o1, FunctionT i2 o2) | length i1 == length i2 && length o1 == length o2 -> do
-    zipWithM_ (unify errF) i1 i2
-    zipWithM_ (unify errF) o1 o2
-  _ -> addError . errF $ "Incompatible types (" ++ show t1 ++ " != " ++ show t2 ++ ")"
+unify errF t1 t2 = return t1 <* (considerEqual t1 t2 >>= flip unless innerUnify)
   where
     linkCompression :: TVarRef s -> TVar s -> Inferrer s (TVarRef s)
     linkCompression uncompressedR (Link (Ref nextR)) = do
@@ -366,6 +338,48 @@ unify errF t1 t2 = return t1 <* case (t1, t2) of
         applyRestriction errF t restr
         writeRef r $ Link t
       Link t' -> void $ unify errF t t'
+    innerUnify = case (t1, t2) of
+      (Ref uncompressedR1, Ref uncompressedR2) -> do
+        r1 <- readRef uncompressedR1 >>= linkCompression uncompressedR1
+        r2 <- readRef uncompressedR2 >>= linkCompression uncompressedR2
+        unless (r1 == r2) $ do
+          pair <- (,) <$> readRef r1 <*> readRef r2
+          case pair of
+            (Unbound _ (Unchangeable n1), Unbound _ (Unchangeable n2)) -> addError . errF $ "Cannot unify differing typevariables " ++ n1 ++ " and " ++ n2
+            (Unbound restr Changeable, Unbound _ _) -> applyRestriction errF (Ref r2) restr >> writeRef r1 (Link $ Ref r2)
+            (Unbound _ _, Unbound restr Changeable) -> applyRestriction errF (Ref r1) restr >> writeRef r2 (Link $ Ref r1)
+            (_, Link t) -> unifyRef t r1
+            (Link t, _) -> unifyRef t r2
+      (Ref r, t) -> readRef r >>= linkCompression r >>= unifyRef t
+      (t, Ref r) -> readRef r >>= linkCompression r >>= unifyRef t
+      (NamedT n1 t1s _ _, NamedT n2 t2s _ _) | n1 == n2 -> zipWithM_ (unify errF) t1s t2s
+      (NamedT _ _ nt1 _, NamedT _ _ nt2 _) | nt1 || nt2 ->
+        addError . errF $ "Incompatible types (" ++ show t1 ++ " != " ++ show t2 ++ ")"
+      (NamedT _ _ _ it, _) -> void $ unify errF it t2
+      (_, NamedT _ _ _ it) -> void $ unify errF t1 it
+      (PointerT i1, PointerT i2) -> void $ unify errF i1 i2
+      (MemorychunkT r11 c1 r12, MemorychunkT r21 c2 r22) | c1 == c2 -> do
+        unify errF r11 r21
+        void $ unify errF r12 r22
+      (StructT p1, StructT p2) | p1names == p2names -> zipWithM_ (unify errF) p1types p2types
+        where
+          (p1names, p1types) = unzip p1
+          (p2names, p2types) = unzip p2
+      (FunctionT i1 o1, FunctionT i2 o2) | length i1 == length i2 && length o1 == length o2 -> do
+        zipWithM_ (unify errF) i1 i2
+        zipWithM_ (unify errF) o1 o2
+      _ -> addError . errF $ "Incompatible types (" ++ show t1 ++ " != " ++ show t2 ++ ")"
+
+considerEqual :: Inferred s -> Inferred s -> Inferrer s Bool
+considerEqual a b
+  | a == b = return True
+  | otherwise = do
+    partitions <- use equals
+    let aClass = fromMaybe [a] $ List.find (elem a) partitions
+        bClass = fromMaybe [b] $ List.find (elem b) partitions
+        others = partitions List.\\ [aClass, bClass]
+    when (aClass == bClass) $ equals .= (List.union aClass bClass : others)
+    return $ aClass == bClass
 
 restrict :: UnifyErrorFunction -> Restriction s -> Inferred s -> Inferrer s (Inferred s)
 restrict errF restr inferred = return inferred <* applyRestriction errF inferred restr
@@ -414,6 +428,8 @@ applyRestriction errF t@(StructT origPs) (PropertiesR restrPs) = recurse origPs 
           addError . errF $ "Unsatisfied property requirement: " ++ show t ++ " lacks property " ++ rpName
           recurse allOrigs restrTail
 
+applyRestriction errF (NamedT _ _ _ t) restr = applyRestriction errF t restr
+
 applyRestriction errF t restr = addError . errF $ "Could not apply restriction " ++ show restr ++ " on type " ++ show t
 
 accessProperty :: UnifyErrorFunction -> String -> Inferred s -> Inferrer s (Inferred s)
@@ -439,6 +455,7 @@ accessProperty errF member inferred = case inferred of
     u -> do
       addError . errF $ show u ++ " cannot have a property " ++ member
       newUnbound NoRestriction
+  NamedT _ _ _ t -> accessProperty errF member t
   t -> do
     addError . errF $ "Type " ++ show t ++ " cannot have a property"
     newUnbound NoRestriction
@@ -472,8 +489,6 @@ makeBool errF inferred = case inferred of
     u -> addError . errF $ show u ++ " cannot be a bool"
   t -> addError . errF $ "Type " ++ show t ++ " does not unify with a bool"
 
--- FIXME: End of code to check for impact of NamedT }
-
 convert :: Ast.Type -> Inferrer s (Inferred s)
 convert t = case t of
   Ast.NamedT n@(c:_) [] | isLower c -> use (typeVariables . at n) >>= \mT -> case mT of
@@ -482,7 +497,19 @@ convert t = case t of
       addError . ErrorString $ "Unknown typevariable '" ++ n ++ "'" -- FIXME: This error will also occur in functions calling incorrectly specified functions, not very helpful
       newUnbound NoRestriction
   _ -> case t of
-    Ast.NamedT n@(c:_) its | isUpper c -> NamedT n <$> mapM convert its -- FIXME: Check for correct number of its according to the typedef
+    Ast.NamedT n@(c:_) its | isUpper c -> use (typeDefs . at n) >>= \mDef -> case mDef of
+      Just (TypeDef nt params origT _) | length params == length its -> do
+        its' <- mapM convert its
+        prevTypeVars <- typeVariables <<%= M.union (M.fromList $ zip params its')
+        origT' <- convert origT
+        typeVariables .= prevTypeVars
+        return $ NamedT n its' nt origT'
+      Just (TypeDef _ params _ _) -> do
+        addError . ErrorString $ "Incorrect instantiation of type '" ++ n ++ "', wrong number of parameters (" ++ show (length its) ++ " != " ++ show (length params) ++ ")"
+        newUnbound NoRestriction
+      Nothing -> do
+        addError . ErrorString $ "Unknown named type '" ++ n ++ "'"
+        newUnbound NoRestriction
     Ast.PointerT it -> PointerT <$> convert it
     Ast.Memorychunk indexT hasCap it -> MemorychunkT <$> convert indexT <*> return hasCap <*> convert it
     Ast.StructT props -> StructT <$> mapM propConvert props

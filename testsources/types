@@ -1,12 +1,24 @@
-Tuple<a, b> : { a : a, b : b }
+alias Tuple<a, b> : { a : a, b : b }
+type Tuple2<a, b> : { a : a, b : b }
+alias Tuple3<a> : { a : a, b : a }
 
-main()(ret) {
-  tup : Tuple<I32, I32>
+func main {
+  ret int
+} -> ret
+  -> ret {
+  mut tup : Tuple<ret, ret>
   {
     tup.a = 2
   }
   tup.a = 4
   tup.b = 3
+
+  mut tup2 : Tuple2<I64, Bool>
+  tup2.a = 42
+  tup2.b = true
+
+  tup3 : Tuple3<ret>
+  blub := tup == tup3
 
   ret = tup.b * 10 + tup.a
 }

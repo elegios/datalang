@@ -125,6 +125,7 @@ generateExpression (Bin operator exp1 exp2 sr) = do
 generateExpression (Zero t) = toLLVMType False t >> (, t, False) . ConstantOperand <$> generateZero t
   where
     generateZero :: Type -> FuncGen C.Constant
+    generateZero named@NamedT{} = ensureTopNotNamed named >>= generateZero
     generateZero (StructT ps) = do
       Just (AST.TypeDefinition n _, _) <- use (genState . structTypes . at (snd <$> ps))
       C.Struct (Just n) False <$> mapM (generateZero . snd) ps
