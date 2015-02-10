@@ -408,6 +408,10 @@ applyRestriction errF t@(Ref r) restr = readRef r >>= \tvar -> case tvar of
         | opName > rpName = do
             unless (changeable == Changeable) . addError . errF $ "Cannot change unchangeable type value, we require " ++ show u ++ " to have a property " ++ rpName ++ " but it does not"
             (rp :) <$> recurse allOrigs restrTail
+      recurse origs [] = return origs
+      recurse [] restrs = do
+        unless (changeable == Changeable) . addError . errF $ "Cannot change unchangeable type value, we require " ++ show u ++ " to have properties " ++ show restrs ++ " but it does not"
+        return restrs
   u -> addError . errF $ "Could not apply restriction " ++ show restr ++ " on type " ++ show t ++ " (" ++ show u ++ ")"
 
 applyRestriction _ (UIntT _) UIntR = return ()
@@ -422,11 +426,13 @@ applyRestriction _ (FloatT _) (NumR spec)
 applyRestriction errF t@(StructT origPs) (PropertiesR restrPs) = recurse origPs restrPs
   where
     recurse allOrigs@((opName, opR) : origTail) allRestrs@((rpName, rpR) : restrTail)
-      | opName == rpName = unify errF opR rpR >> recurse origPs restrPs
+      | opName == rpName = unify errF opR rpR >> recurse origTail restrTail -- TODO: this is basically the exact same thing as accessProperty, should probably be defined at the same place
       | opName < rpName = recurse origTail allRestrs
       | opName > rpName = do
           addError . errF $ "Unsatisfied property requirement: " ++ show t ++ " lacks property " ++ rpName
           recurse allOrigs restrTail
+    recurse _ [] = return ()
+    recurse [] restrs = addError . errF $ "Unsatisfied property requirement: " ++ show t ++ " lacks properties " ++ show restrs
 
 applyRestriction errF (NamedT _ _ _ t) restr = applyRestriction errF t restr
 

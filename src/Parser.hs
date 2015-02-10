@@ -117,10 +117,10 @@ terminator = withPosition (Terminator <$> keyword) <?> "terminator"
   where keyword = replace reserved "return" Return <|> replace reserved "break" Break <|> replace reserved "continue" Continue
 
 varInit :: Parser Statement
-varInit = withPosition (VarInit <$> mutable <*> identifier <*> typeAnno <*> value) <?> "var init"
+varInit = withPosition (VarInit <$> (reserved "let" >> mutable) <*> identifier <*> typeAnno <*> value) <?> "var init"
   where
     mutable = option False $ replace reserved "mut" True
-    typeAnno = char ':' >> whiteSpace >> option UnknownT typeLiteral
+    typeAnno = option UnknownT $ reservedOp ":" >> typeLiteral
     value = option (Zero UnknownT) $ reservedOp "=" >> expression
 
 expression :: Parser Expression

@@ -24,12 +24,15 @@ main :: IO ()
 main = do
   sourceFile : _ <- getArgs
   source <- parseFile sourceFile >>= either (fail . show) return
+  putStrLn "Parse done"
   let (inferenceErrors, inferredSource) = fullInfer source
   unless (null inferenceErrors) $ do
     putStrLn "inference errors:"
     mapM_ print inferenceErrors
     exitFailure
+  putStrLn "Inference done"
   writeSourceToObjectFile inferredSource requested $ replaceExtension sourceFile "o"
+  putStrLn "Codegen done"
   where requested = Map.fromList [(ExprSig "main" [] (IntT S32), Right . O.ConstantOperand . C.GlobalReference (T.FunctionType T.i32 [] False) $ Name.Name "main")]
 
 writeSourceToObjectFile :: Source -> GenFuncs -> FilePath -> IO ()
