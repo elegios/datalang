@@ -8,7 +8,7 @@ import Data.STRef
 import Data.Tuple (swap)
 import Data.Char (isLower, isUpper)
 import Data.Generics.Uniplate.Direct
-import Control.Applicative ((<*>), (<*))
+import Control.Applicative ((<*>), (<*), getZipList, ZipList(..))
 import Control.Monad.ST
 import Control.Monad.State
 import Control.Lens hiding (op, universe, plate)
@@ -314,10 +314,11 @@ unifyExternalFunction fName inTs outTs sr = do
       FunctionT funcInTs' funcOutTs' <- convertFuncSig restrs funcInTs funcOutTs Unbounds
       when (length funcInTs /= length inTs) . addError . ErrorString $ "Wrong number of in arguments at " ++ show sr
       when (length funcOutTs /= length outTs) . addError . ErrorString $ "Wrong number of out arguments at " ++ show sr
-      zipWithM_ (unify errF) funcInTs' inTs
-      zipWithM_ (unify errF) funcOutTs' outTs
+      unifyArguments "in" funcInTs' inTs
+      unifyArguments "out" funcOutTs' outTs
   where
-    errF m = ErrorString $ "Type mismatch in function argument at " ++ show sr ++ ": " ++ show m -- TODO: report which argument
+    errF inOut num m = ErrorString $ "Type mismatch in function " ++ inOut ++ " argument number " ++ show num ++  " at " ++ show sr ++ ": " ++ show m
+    unifyArguments inOut ts' ts = sequence_ . getZipList $ unify <$> ZipList (errF inOut <$> [(1 :: Int)..]) <*> ZipList ts' <*> ZipList ts
 
 -- FIXME: Beginning of code to check for impact of NamedT (The functions herein need to read through the name) {
 
@@ -465,7 +466,6 @@ makePointer errF inferred = case inferred of
 makeBool :: UnifyErrorFunction -> Inferred s -> Inferrer s ()
 makeBool errF inferred = case inferred of
   BoolT -> return ()
-  -- (_, Unchangeable _) -> addError . errF $ "Attempt to make an unchangeable non-bool type value into a bool"
   Ref r -> readRef r >>= \tvar -> case tvar of
     Link inf -> makeBool errF inf
     Unbound NoRestriction Changeable -> void . writeRef r $ Link BoolT
