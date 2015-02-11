@@ -27,11 +27,11 @@ initialFuncState :: GenState -> FuncState
 initialFuncState currGenState = FuncState currGenState Nothing Nothing (Ret Nothing []) M.empty M.empty 0 [] entryBlock (Defers [] [] [])
   where entryBlock = BasicBlock (Name "entry") [] . Do $ Ret Nothing []
 
-generateFunction :: FuncSig -> CodeGen (Either ErrorMessage AST.Definition)
-generateFunction sig@(NormalSig fName inTs outTs) = do
+generateFunction :: Signature -> CodeGen (Either ErrorMessage AST.Definition)
+generateFunction sig@(ProcSig fName inTs outTs) = do
   currGenState <- get
   let generateBody = do
-        (FuncDef inTSpec outTSpec _ innames outnames stmnt _) <-
+        (ProcDef inTSpec outTSpec _ innames outnames stmnt _) <-
           use (genState . source . to functionDefinitions . at fName) >>=
           justErr (ErrorString $ "Compiler error: Function " ++ fName ++ " not found")
 
@@ -47,13 +47,13 @@ generateFunction sig@(NormalSig fName inTs outTs) = do
     Left e -> return $ Left e
     Right (res, st) -> put (_genState st) >> return (Right res)
 
-generateFunction sig@(ExprSig fName inTs outT) = do
+generateFunction sig@(FuncSig fName inTs outT) = do
   currGenState <- get
   let initState = FuncState currGenState Nothing Nothing (Br (Name "returnBlock") []) M.empty M.empty 0 [] entryBlock (Defers [] [] [])
       entryBlock = BasicBlock (Name "entry") [] . Do $ Br (Name "returnBlock") []
       retBlock = BasicBlock (Name "returnBlock") [] . Do $ Ret Nothing []
       generateBody = do
-        (FuncDef inTSpec [outTSpec] _ innames [outname] stmnt sr) <-
+        (FuncDef inTSpec outTSpec _ innames outname stmnt sr) <-
           use (genState . source . to functionDefinitions . at fName)
           >>= justErr (ErrorString $ "Compiler error: Function " ++ fName ++ " not found")
 
@@ -88,7 +88,7 @@ generateInitialFunctionLocals innames inTs outnames outTs = do
       initialLocals = M.fromList . zip (innames ++ outnames) . zipWith ($) types $ paramLocals
   return (initialLocals, params)
 
-constructFunctionDeclaration :: FuncSig -> [Parameter] -> T.Type -> FuncGen AST.Definition
+constructFunctionDeclaration :: Signature -> [Parameter] -> T.Type -> FuncGen AST.Definition
 constructFunctionDeclaration sig params retty = do
   use currentBlock >>= finalizeBlock
   blocks <- use finalizedBlocks

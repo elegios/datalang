@@ -44,27 +44,35 @@ sourceParser :: Parser Source
 sourceParser = toSource <$> topParser
 
 toSource :: [Top] -> Source
-toSource tops = Source funcDefs typeDefs
+toSource tops = Source callableDefs typeDefs
   where
-    funcDefs = M.fromList [ (n, d) | FunctionDefinition n d <- tops ]
+    callableDefs = M.fromList [ (n, d) | CallableDefinition n d <- tops ]
     typeDefs = M.fromList [ (n, d) | TypeDefinition n d <- tops ]
 
-data Top = FunctionDefinition String FuncDef | TypeDefinition String TypeDef
+data Top = CallableDefinition String CallableDef | TypeDefinition String TypeDef
 
 -- TODO: ensure 'try' is used in the right places
 topParser :: Parser [Top]
-topParser = whiteSpace >> many (funcDef <|> typeDef) <* eof
+topParser = whiteSpace >> many (callableDef <|> typeDef) <* eof
 
-funcDef :: Parser Top
-funcDef = withPosition $ reserved "func" >> makedef <$> identifier <*> def
+callableDef :: Parser Top
+callableDef = withPosition $
+  (reserved "proc" >> makedef <$> identifier <*> procdef) <|>
+  (reserved "func" >> makedef <$> identifier <*> funcdef)
   where
-    makedef n d sr = FunctionDefinition n $ d sr
-    def = do
+    makedef n d sr = CallableDefinition n $ d sr
+    procdef = do
       restrs <- option [] . braces $ many restriction
-      (inTs, outTs) <- funcsig typeLiteral
-      (ins, outs) <- funcsig identifier
-      FuncDef inTs outTs restrs ins outs <$> scope
-    funcsig p = (,) <$> commaSep p <* reservedOp "->" <*> commaSep p
+      (inTs, outTs) <- procsig typeLiteral
+      (ins, outs) <- procsig identifier
+      ProcDef inTs outTs restrs ins outs <$> scope
+    funcdef = do
+      restrs <- option [] . braces $ many restriction
+      (inTs, outT) <- funcsig typeLiteral
+      (ins, out) <- funcsig identifier
+      FuncDef inTs outT restrs ins out <$> scope
+    procsig p = (,) <$> commaSep p <* reservedOp "->" <*> commaSep p
+    funcsig p = (,) <$> commaSep p <* reservedOp "->" <*> p
 
 restriction :: Parser (String, Restriction)
 restriction = (,) <$> identifier <*> (numR <|> uintR <|> propertiesR)
@@ -76,7 +84,7 @@ restriction = (,) <$> identifier <*> (numR <|> uintR <|> propertiesR)
     propertiesR = (\(StructT ps) -> PropertiesR ps) <$> structTypeLiteral
 
 statement :: Parser Statement
-statement = funcCall
+statement = procCall
         <|> defer
         <|> shallowCopy
         <|> ifStatement
@@ -85,8 +93,8 @@ statement = funcCall
         <|> terminator
         <|> varInit
 
-funcCall :: Parser Statement
-funcCall = withPosition (try (FuncCall <$> identifier <*> argumentlist) <*> argumentlist) <?> "functioncall"
+procCall :: Parser Statement
+procCall = withPosition (try (ProcCall <$> identifier <*> argumentlist) <*> argumentlist) <?> "procedurecall"
   where argumentlist = parens $ commaSep expression
 
 defer :: Parser Statement
@@ -152,7 +160,7 @@ postfix :: String -> UnOp -> Operator StreamType StateType UnderlyingMonad Expre
 postfix name op = Postfix (withPosition $ flip (Un op) <$ reservedOp name)
 
 simpleExpression :: Parser Expression
-simpleExpression = (parens expression <|> exprFunc <|> exprLit <|> variable) >>= contOrNo <?> "simple expression"
+simpleExpression = (parens expression <|> funcCall <|> exprLit <|> variable) >>= contOrNo <?> "simple expression"
   where
     contOrNo prev = cont prev <|> return prev
     cont prev = choice $ map ($ prev) [memberAccess, subscript]
@@ -166,8 +174,8 @@ memberAccess expr = withPosition $ dot >> MemberAccess expr <$> identifier
 subscript :: Expression -> Parser Expression
 subscript expr = withPosition $ Subscript expr <$> brackets expression
 
-exprFunc :: Parser Expression
-exprFunc = withPosition $ try (ExprFunc <$> identifier <*> argumentlist) <*> return UnknownT
+funcCall :: Parser Expression
+funcCall = withPosition $ try (FuncCall <$> identifier <*> argumentlist) <*> return UnknownT
   where argumentlist = parens $ commaSep expression
 
 exprLit :: Parser Expression

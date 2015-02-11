@@ -57,10 +57,10 @@ generateStatement (ShallowCopy assignee expression _) = do
   (expOp, _, _) <- generateExpression expression >>= toImmutable
   uinstr $ Store False assOp expOp Nothing 0 []
 
-generateStatement (FuncCall fName ins outs _) = do
+generateStatement (ProcCall fName ins outs _) = do
   inOps <- mapM (generateExpression >=> toImmutable) ins
   outOps <- mapM generateExpression outs -- TODO: death in llvm if not all outops are mutable
-  funcOp <- requestFunction $ NormalSig fName (opType <$> inOps) (opType <$> outOps)
+  funcOp <- requestFunction $ ProcSig fName (opType <$> inOps) (opType <$> outOps)
   uinstr $ Call False CC.C [] funcOp (zip (map opOp $ inOps ++ outOps) $ repeat []) [] []
 
 generateStatement (While condition stmnt _) = do

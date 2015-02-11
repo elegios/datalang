@@ -73,10 +73,10 @@ generateExpression (ExprLit lit _) = case lit of
     t' <- ensureTopNotNamed t
     return (ConstantOperand $ C.Undef llvmt, t', False)
 
-generateExpression (ExprFunc fName expressions t _) = do
+generateExpression (FuncCall fName expressions t _) = do
   ops <- mapM (generateExpression >=> toImmutable) expressions
   retty <- ensureTopNotNamed t
-  funcOp <- requestFunction $ ExprSig fName (opType <$> ops) retty
+  funcOp <- requestFunction $ FuncSig fName (opType <$> ops) retty
   llvmtype <- toLLVMType False t
   retOp <- instr (Call False CC.C [] funcOp (zip (opOp <$> ops) $ repeat []) [] [], llvmtype)
   return (retOp, retty, False)

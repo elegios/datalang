@@ -4,11 +4,11 @@ func fib {
 t -> t
 n -> b {
   b = 1
-  mut a := 1
-  mut index := n - 2
+  let mut a = 1
+  let mut index = n - 2
   while index > 0 {
     defer index = index - 1
-    next := a + b
+    let next = a + b
     a = b
     b = next
   }
@@ -31,5 +31,5 @@ func main {
 }
 -> rType
 -> ret {
-  fibSlow(45)(ret)
+  ret = fibSlow(45)
 }

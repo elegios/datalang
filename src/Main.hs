@@ -33,7 +33,7 @@ main = do
   putStrLn "Inference done"
   writeSourceToObjectFile inferredSource requested $ replaceExtension sourceFile "o"
   putStrLn "Codegen done"
-  where requested = Map.fromList [(ExprSig "main" [] (IntT S32), Right . O.ConstantOperand . C.GlobalReference (T.FunctionType T.i32 [] False) $ Name.Name "main")]
+  where requested = Map.fromList [(FuncSig "main" [] (IntT S32), Right . O.ConstantOperand . C.GlobalReference (T.FunctionType T.i32 [] False) $ Name.Name "main")]
 
 writeSourceToObjectFile :: Source -> GenFuncs -> FilePath -> IO ()
 writeSourceToObjectFile source requested oPath = case generate source requested of

@@ -74,7 +74,7 @@ newBlock = do
 fresh :: FuncGen Name
 fresh = liftM UnName $ nextFresh <<+= 1
 
-requestFunction :: FuncSig -> FuncGen CallableOperand
+requestFunction :: Signature -> FuncGen CallableOperand
 requestFunction func = do
   mo <- gets $ getFunctionOperand func . _genState
   maybe newRequest return mo
@@ -88,10 +88,10 @@ requestFunction func = do
       llvmt <- toFunctionType inTs outTs retty
       requestWithOperand . Right . ConstantOperand . C.GlobalReference llvmt . Name $ fname ++ show num
     (fname, inTs, outTs, retty) = case func of
-      NormalSig n its ots -> (n, its, ots, Nothing)
-      ExprSig n its ot -> (n, its, [], Just ot)
+      ProcSig n its ots -> (n, its, ots, Nothing)
+      FuncSig n its ot -> (n, its, [], Just ot)
 
-getFunctionOperand :: FuncSig -> GenState -> Maybe CallableOperand
+getFunctionOperand :: Signature -> GenState -> Maybe CallableOperand
 getFunctionOperand sig state = case M.lookup sig $ _generated state of
   Just o -> Just o
   Nothing -> M.lookup sig $ _requested state

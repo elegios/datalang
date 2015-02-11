@@ -15,7 +15,7 @@ import qualified Data.Map as M
 
 type CodeGen a = StateT GenState Identity a
 
-type GenFuncs = M.Map FuncSig CallableOperand
+type GenFuncs = M.Map Signature CallableOperand
 
 data ErrorMessage = ErrorString String deriving Show
 

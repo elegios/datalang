@@ -16,12 +16,13 @@ instance Show SourceRange where
   show (SourceRange start@(SourceLoc f _ _) end) = f ++ "(" ++ pos start ++ " - " ++ pos end ++ ")"
     where pos (SourceLoc _ l c) = show l ++ ":" ++ show c
 
-data FuncSig = NormalSig String [Type] [Type]
-             | ExprSig String [Type] Type deriving (Eq, Ord)
+type Signature = SignatureT Type
+data SignatureT t = ProcSig String [t] [t]
+                | FuncSig String [t] t deriving (Eq, Ord)
 
 type Source = SourceT Type
 data SourceT t = Source
-  { functionDefinitions :: M.Map String (FuncDefT t)
+  { functionDefinitions :: M.Map String (CallableDefT t)
   , typeDefinitions :: M.Map String TypeDef
   } deriving Show
 -- TODO: Some form of namespaces
@@ -74,8 +75,9 @@ data RestrictionT t = NoRestriction
                     deriving (Show, Eq)
 data NumSpec = NoSpec | IntSpec | FloatSpec deriving (Show, Eq)
 
-type FuncDef = FuncDefT Type
-data FuncDefT t = FuncDef
+type CallableDef = CallableDefT Type
+data CallableDefT t =
+  ProcDef
   { intypes :: [t]
   , outTypes :: [t]
   , restrictions :: [(String, Restriction)]
@@ -83,10 +85,20 @@ data FuncDefT t = FuncDef
   , outargs :: [String]
   , functionBody :: StatementT t
   , sourcerange :: SourceRange
-  } deriving Show
+  } |
+  FuncDef
+  { intypes :: [t]
+  , retType :: t
+  , restrictions :: [(String, Restriction)]
+  , inargs :: [String]
+  , retarg :: String
+  , functionBody :: StatementT t
+  , sourcerange :: SourceRange
+  }
+  deriving Show
 
 type Statement = StatementT Type
-data StatementT t = FuncCall String [ExpressionT t] [ExpressionT t] SourceRange
+data StatementT t = ProcCall String [ExpressionT t] [ExpressionT t] SourceRange
                   | Defer (StatementT t) SourceRange
                   | ShallowCopy (ExpressionT t) (ExpressionT t) SourceRange
                   | If (ExpressionT t) (StatementT t) (Maybe (StatementT t)) SourceRange
@@ -108,7 +120,7 @@ data ExpressionT t = Bin BinOp (ExpressionT t) (ExpressionT t) SourceRange
                    | MemberAccess (ExpressionT t) String SourceRange
                    | Subscript (ExpressionT t) (ExpressionT t) SourceRange
                    | Variable String SourceRange
-                   | ExprFunc String [ExpressionT t] t SourceRange
+                   | FuncCall String [ExpressionT t] t SourceRange
                    | ExprLit (LiteralT t) SourceRange
                    | Zero t
                    deriving Show

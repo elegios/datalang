@@ -29,10 +29,12 @@ data InferrerState s = InferrerState
   { _errors :: [ErrorMessage]
   , _variables :: M.Map String (Inferred s)
   , _typeVariables :: M.Map String (Inferred s)
-  , _functions :: M.Map String Ast.FuncDef
+  , _functions :: M.Map String Ast.CallableDef
   , _typeDefs :: M.Map String Ast.TypeDef
   , _equals :: [[Inferred s]]
   }
+
+-- FIXME: enter funcdefs as well
 
 -- TODO: support for typeclasses and similar stuff
 data Inferred s = IntT TSize
@@ -83,29 +85,36 @@ fullInfer source = (reverse errs, newSource)
     (errs, newFuncDefs) = M.mapAccum (infer funcs types) [] funcs
     newSource = source { functionDefinitions = newFuncDefs }
 
-infer :: M.Map String Ast.FuncDef -> M.Map String Ast.TypeDef -> [ErrorMessage] -> Ast.FuncDef -> ([ErrorMessage], Ast.FuncDef)
+infer :: M.Map String Ast.CallableDef -> M.Map String Ast.TypeDef -> [ErrorMessage] -> Ast.CallableDef -> ([ErrorMessage], Ast.CallableDef)
 infer funcs types errs def = runST $ convertOutput <$> runStateT inference initState
   where
     initState = InferrerState errs M.empty M.empty funcs types []
     inference = enterInfer def >>= exitInfer
     convertOutput = (_1 %~ view errors) . swap
 
-enterInfer :: FuncDefT Ast.Type -> Inferrer s (FuncDefT (Inferred s))
-enterInfer inDef = do
+enterInfer :: CallableDefT Ast.Type -> Inferrer s (CallableDefT (Inferred s))
+enterInfer (Ast.ProcDef inTs outTs restrs ins outs body sr) = do
   FunctionT inTs' outTs' <- convertFuncSig restrs inTs outTs Environment
   zipWithM_ defineLocal (ins ++ outs) (inTs' ++ outTs')
   body' <- enterStatement body
-  return $ Ast.FuncDef inTs' outTs' restrs ins outs body' sr
+  return $ Ast.ProcDef inTs' outTs' restrs ins outs body' sr
   where
-    Ast.FuncDef inTs outTs restrs ins outs body sr = inDef
+    defineLocal n t = variables . at n ?= t
+
+enterInfer (Ast.FuncDef inTs outT restrs ins out body sr) = do
+  FunctionT inTs' [outT'] <- convertFuncSig restrs inTs [outT] Environment
+  zipWithM_ defineLocal (out : ins) (outT' : inTs')
+  body' <- enterStatement body
+  return $ Ast.FuncDef inTs' outT' restrs ins out body' sr
+  where
     defineLocal n t = variables . at n ?= t
 
 enterStatement :: StatementT Ast.Type -> Inferrer s (StatementT (Inferred s))
-enterStatement (FuncCall fName inexprs outexprs sr) = do
+enterStatement (ProcCall pName inexprs outexprs sr) = do
   (inexprs', inTs) <- unzip <$> mapM enterExpression inexprs
   (outexprs', outTs) <- unzip <$> mapM enterExpression outexprs
-  unifyExternalFunction fName inTs outTs sr
-  return $ FuncCall fName inexprs' outexprs' sr
+  unifyExternalFunction (ProcSig pName inTs outTs) sr
+  return $ ProcCall pName inexprs' outexprs' sr
 
 enterStatement (Defer stmnt sr) = Defer <$> enterStatement stmnt <*> return sr
 
@@ -206,11 +215,11 @@ enterExpression (Variable vName sr) =
           addError . ErrorString $ vName ++ " is not in scope at " ++ show sr
           newUnbound NoRestriction
 
-enterExpression (ExprFunc fName inExprs t sr) = do
+enterExpression (FuncCall fName inExprs t sr) = do
   (inExprs', inTs) <- unzip <$> mapM enterExpression inExprs
   convertedT <- convert t
-  unifyExternalFunction fName inTs [convertedT] sr
-  return (ExprFunc fName inExprs' convertedT sr, convertedT)
+  unifyExternalFunction (FuncSig fName inTs convertedT) sr
+  return (FuncCall fName inExprs' convertedT sr, convertedT)
 
 enterExpression (ExprLit lit sr) = (_1 %~ (`ExprLit` sr)) <$> enterLiteral lit
 
@@ -231,18 +240,22 @@ enterLiteral (Null Ast.UnknownT sr) =
 buildReturn :: (t -> a, t -> b) -> t -> (a, b)
 buildReturn (a, b) t = (a t, b t)
 
-exitInfer :: FuncDefT (Inferred s) -> Inferrer s (FuncDefT Ast.Type)
-exitInfer outDef = do
+exitInfer :: CallableDefT (Inferred s) -> Inferrer s (CallableDefT Ast.Type)
+exitInfer (Ast.ProcDef inTs outTs restrs ins outs body sr) = do
   inTs' <- mapM (convertBack $ exitError sr) inTs
   outTs' <- mapM (convertBack $ exitError sr) outTs
   body' <- exitStatement body
-  return $ Ast.FuncDef inTs' outTs' restrs ins outs body' sr
-  where
-    Ast.FuncDef inTs outTs restrs ins outs body sr = outDef
+  return $ Ast.ProcDef inTs' outTs' restrs ins outs body' sr
+
+exitInfer (Ast.FuncDef inTs outT restrs ins out body sr) = do
+  inTs' <- mapM (convertBack $ exitError sr) inTs
+  outT' <- convertBack (exitError sr) outT
+  body' <- exitStatement body
+  return $ Ast.FuncDef inTs' outT' restrs ins out body' sr
 
 exitStatement :: StatementT (Inferred s) -> Inferrer s (StatementT Ast.Type)
-exitStatement (FuncCall s ins outs sr) =
-  FuncCall s <$> mapM exitExpression ins <*> mapM exitExpression outs <*> return sr
+exitStatement (ProcCall s ins outs sr) =
+  ProcCall s <$> mapM exitExpression ins <*> mapM exitExpression outs <*> return sr
 exitStatement (Defer stmnt sr) =
   flip Defer sr <$> exitStatement stmnt
 exitStatement (ShallowCopy exp1 exp2 sr) =
@@ -268,8 +281,8 @@ exitExpression (MemberAccess expr prop sr) =
 exitExpression (Subscript exp1 exp2 sr) =
   Subscript <$> exitExpression exp1 <*> exitExpression exp2 <*> return sr
 exitExpression (Variable n sr) = return $ Variable n sr
-exitExpression (ExprFunc n ins t sr) =
-  ExprFunc n <$> mapM exitExpression ins <*> convertBack (exitError sr) t <*> return sr
+exitExpression (FuncCall n ins t sr) =
+  FuncCall n <$> mapM exitExpression ins <*> convertBack (exitError sr) t <*> return sr
 exitExpression (ExprLit lit sr) =
   flip ExprLit sr <$> exitLiteral lit
 exitExpression (Zero t) =
@@ -308,20 +321,27 @@ convertBack errF inferred = case inferred of
     BoolT -> Ast.BoolT
     IntT s -> Ast.IntT s; UIntT s -> Ast.UIntT s; FloatT s -> Ast.FloatT s
 
-unifyExternalFunction :: String -> [Inferred s] -> [Inferred s] -> SourceRange -> Inferrer s ()
-unifyExternalFunction fName inTs outTs sr = do
-  mFunc <- use $ functions . at fName
-  case mFunc of
-    Nothing -> addError . ErrorString $ "Unknown function " ++ fName ++ " at " ++ show sr
-    Just (Ast.FuncDef funcInTs funcOutTs restrs _ _ _ _) -> do
+unifyExternalFunction :: SignatureT (Inferred s) -> SourceRange -> Inferrer s ()
+unifyExternalFunction sig sr = do
+  mFunc <- use $ functions . at (sigName sig)
+  case (mFunc, sig) of
+    (Nothing, _) -> addError . ErrorString $ "Unknown function " ++ sigName sig ++ " at " ++ show sr
+    (Just (Ast.ProcDef funcInTs funcOutTs restrs _ _ _ _), ProcSig _ inTs outTs) ->
+      unifyWork restrs funcInTs funcOutTs inTs outTs
+    (Just (Ast.FuncDef funcInTs funcOutT restrs _ _ _ _), FuncSig _ inTs outT) ->
+      unifyWork restrs funcInTs [funcOutT] inTs [outT]
+    _ -> addError . ErrorString $ "Callable type mismatch, you're using a function as a procedure or vice-versa (at " ++ show sr ++ ")"
+  where
+    sigName (ProcSig n _ _) = n
+    sigName (FuncSig n _ _) = n
+    errF inOut num m = ErrorString $ "Type mismatch in function " ++ inOut ++ " argument number " ++ show num ++  " at " ++ show sr ++ ": " ++ show m
+    unifyArguments inOut ts' ts = sequence_ . getZipList $ unify <$> ZipList (errF inOut <$> [(1 :: Int)..]) <*> ZipList ts' <*> ZipList ts
+    unifyWork restrs funcInTs funcOutTs inTs outTs = do
       FunctionT funcInTs' funcOutTs' <- convertFuncSig restrs funcInTs funcOutTs Unbounds
       when (length funcInTs /= length inTs) . addError . ErrorString $ "Wrong number of in arguments at " ++ show sr
       when (length funcOutTs /= length outTs) . addError . ErrorString $ "Wrong number of out arguments at " ++ show sr
       unifyArguments "in" funcInTs' inTs
       unifyArguments "out" funcOutTs' outTs
-  where
-    errF inOut num m = ErrorString $ "Type mismatch in function " ++ inOut ++ " argument number " ++ show num ++  " at " ++ show sr ++ ": " ++ show m
-    unifyArguments inOut ts' ts = sequence_ . getZipList $ unify <$> ZipList (errF inOut <$> [(1 :: Int)..]) <*> ZipList ts' <*> ZipList ts
 
 unify :: UnifyErrorFunction -> Inferred s -> Inferred s -> Inferrer s (Inferred s)
 unify errF t1 t2 = return t1 <* (considerEqual t1 t2 >>= flip unless innerUnify)
