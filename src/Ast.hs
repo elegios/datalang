@@ -122,6 +122,7 @@ data ExpressionT t = Bin BinOp (ExpressionT t) (ExpressionT t) SourceRange
                    | Variable String SourceRange
                    | FuncCall String [ExpressionT t] t SourceRange
                    | ExprLit (LiteralT t) SourceRange
+                   | TypeAssertion Expression Type SourceRange
                    | Zero t
                    deriving Show
 -- TODO: Bitcast, conversion.

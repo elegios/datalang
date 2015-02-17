@@ -223,6 +223,13 @@ enterExpression (FuncCall fName inExprs t sr) = do
 
 enterExpression (ExprLit lit sr) = (_1 %~ (`ExprLit` sr)) <$> enterLiteral lit
 
+enterExpression (TypeAssertion expr t sr) = do
+  t' <- convert t
+  (expr', innerT) <- enterExpression expr
+  unify errF innerT t'
+  return (expr', t')
+  where errF m = ErrorString $ "Failed type assertion at " ++ show sr ++ ": " ++ show m
+
 enterExpression (Zero t) = buildReturn (Zero, id) <$> convert t
 
 enterLiteral :: LiteralT Ast.Type -> Inferrer s (LiteralT (Inferred s), Inferred s)

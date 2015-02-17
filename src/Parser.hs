@@ -32,9 +32,15 @@ langDef = T.LanguageDef
   , T.identStart = letter
   , T.identLetter = alphaNum <|> char '_'
   , T.opStart = T.opLetter langDef
-  , T.opLetter = oneOf "+-*/%<>=!^&|"
-  , T.reservedNames = ["defer", "if", "else", "while", "return", "break", "continue", "null", "mut", "func"] -- TODO: all built-in type literals
-  , T.reservedOpNames = ["=", "+", "-", "*", "/", "%", "<", ">", "==", "!=", "<=", ">=", ":"] -- TODO: figure out if all these need/should be added, this list is currently incomplete
+  , T.opLetter = oneOf "+-*/%<>=!^&|:,"
+  , T.reservedNames = ["defer", "if", "else", "while", "return", "break", "continue", "null", "mut", "func", "proc"]
+  , T.reservedOpNames =
+    [ "-", "^", "&", "!", "*"
+    , "/", "%", "+", "-", "<<"
+    , ">>", ">>>", "|", "<"
+    , ">", "<=", ">=", ":"
+    , "==", "!=", "&&", "||"
+    ]
   }
 
 parseFile :: FilePath -> IO (Either ParseError Source)
@@ -144,6 +150,7 @@ expressionTable =
   , [binary "<<" LShift, binary ">>" LogRShift, binary ">>>" AriRShift]
   , [binary "&" BinAnd]
   , [binary "|" BinOr]
+  , [typeAssertion]
   , [binary "<" Lesser, binary ">" Greater, binary "<=" LE, binary ">=" GE, binary "==" Equal, binary "!=" NotEqual]
   , [binary "&&" ShortAnd]
   , [binary "||" ShortOr]
@@ -156,8 +163,10 @@ binary  name op = Infix (withPosition $ (\s e1 e2 -> Bin op e1 e2 s) <$ reserved
 prefix :: String -> UnOp -> Operator StreamType StateType UnderlyingMonad Expression
 prefix name op = Prefix (withPosition $ flip (Un op) <$ reservedOp name)
 
-postfix :: String -> UnOp -> Operator StreamType StateType UnderlyingMonad Expression
-postfix name op = Postfix (withPosition $ flip (Un op) <$ reservedOp name)
+typeAssertion :: Operator StreamType StateType UnderlyingMonad Expression
+typeAssertion = Postfix $ withPosition assertion
+  where
+    assertion = (\lit p e -> TypeAssertion e lit p) <$> (reservedOp ":" >> typeLiteral)
 
 simpleExpression :: Parser Expression
 simpleExpression = (parens expression <|> funcCall <|> exprLit <|> variable) >>= contOrNo <?> "simple expression"
