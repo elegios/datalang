@@ -393,3 +393,100 @@ int}, then unify with T, which works but changes the type of f(2, 4) :
 T, which is different. Codegen may or may not deal with this in the
 correct way, depending on how function implementation instantiation
 works.
+
+----------------------------------------------------------------------
+
+I want to be able to differentiate the underlying location of data
+from the means to access it, for example allowing SOA types, but also
+containers that can be used in pleasant ways. The built-in list type
+would for example be using this to build on top of a simple struct
+with a pointer.
+
+type Array<i, t> {
+  hide ptr
+  [i] | 0 <= i && i < len -> ptr[i]
+  [s = 0 : e = len] | 0 <= s && s <= e && e <= len -> Slice { len = e - s, ptr = ^ptr[s] }
+} { len : i, cap : i, ptr : ^t }
+
+type Slice<i, t> {
+  hide ptr
+  [i] | 0 <= i && i < len -> ptr[i]
+  [s = 0 : e = len] | 0 <= s && s <= e && e <= len -> Slice { len = e - s, ptr = ^ptr[s] }
+} { len : i, ptr : ^t }
+
+type Id<i> {
+  value -> self
+  next -> self + 1
+  prev -> self - 1
+} i
+
+First, this idea assumes that each newtype introduces a special
+'function' with the same name that converts from the underlying type
+to the newtype, and that the syntax is a bit strange, not sure about
+that. After that, it enables hygenic macros with very special forms,
+namely identifiers or expressions within [], with some extra stuff.
+
+The first curly braces represents alterations to the namespace of the
+original type.
+
+Type inference would look in the type for the existance of the given
+name or []-expression, then pattern-match.
+
+<pattern> [| <condition>] -> <replacement>
+
+A <pattern> is either an identifier or brackets surrounding a list of
+tokens. Each token is either an identifier (with optional default
+value), a comma or a colon. Note that this precludes the usage of
+colon anywhere in an expression to assert the type of something, which
+is probably not what we want. It might be a good idea to have some
+other token, as we want to be able to parse a []-expression without
+knowing the type or having the types definition. The specific tokens
+would be gathered after operators are finalized. They can probably be
+rather few though. It is also possible that we want to allow any
+operator that is not already reserved, which would actually be easy to
+do, but would make any changes to existing operators kinda
+breaking. Operators might be expected to remain mostly the same though
+I guess.
+
+A <condition> is something that will be inserted into the code as a
+runtime check (which will throw an error with the location in the code
+upon failure) right before the replacement is evaluated.
+
+A <replacement> is an expression, meaning no side-effects and only
+control flow if it calls a function. The replacement is done in a
+hygienic fashion, no nameclashes etc., and each argument (in the case
+of a []-expression) is only evaluated once. Name resolution here first
+looks at arguments, then canonical form, then normal name
+resolution. Note that the newtype exposed names are not available
+here. A special name is availible to represent the current object of
+canonical form, 'self'. An option here is also that the names of the
+canonical form are not available directly, instead you have to access
+them through self, but that might make things unnecessarily verbose.
+
+These are less powerful than true macros (hygienic or otherwise), but
+the type system knows about them and it should make it reasonably easy
+to state where code should go. Nothing really fancy can happen here as
+only functions are allowed, not procedures.
+
+type Player {
+  x -> transform.x
+  y -> transform.y
+  z -> transform.z
+} { transform : ^Transform, alive : Bool }
+type Player {
+  import(transform) // Could get more than the above if a Transform has more than just x, y and z
+} { transform : ^Transform, alive : Bool }
+
+type SOAPlayers<i> {
+  [i] -> SOAPlayer { array = ^self, index = i}
+} { transforms : Array<i, Transform>, alives : Array<i, Bool> }
+type SOAPlayer<i> {
+  transform -> transforms[index]
+  alives -> alives[index]
+}
+
+This allows SOA, but not in a very nice fashion. This particular
+pattern could most definitely be automatically generated, but I'm not
+sure how that mechanic should be implemented. It would be compile time
+runnable, relatively fancy macro expansion. Maybe, but should probably
+be saved for later.
