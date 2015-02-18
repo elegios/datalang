@@ -18,7 +18,7 @@ instance Show SourceRange where
 
 type Signature = SignatureT Type
 data SignatureT t = ProcSig String [t] [t]
-                | FuncSig String [t] t deriving (Eq, Ord)
+                  | FuncSig String [t] t deriving (Eq, Ord)
 
 type Source = SourceT Type
 data SourceT t = Source
@@ -35,16 +35,25 @@ data Type = IntT TSize
           | FloatT TSize
           | BoolT
           | NamedT String [Type]
+          | NewTypeT String Replacements Type
           | PointerT Type
-          | Memorychunk Type Bool Type
           | StructT [(String, Type)]
           | UnknownT
-          deriving (Show, Ord, Eq) -- TODO: Manual definition using uniplate.direct for speed
+          deriving (Show, Ord, Eq)
 
-type NewType = Bool
-data TypeDef = TypeDef NewType [String] Type SourceRange deriving Show
-instance Eq TypeDef where
-  (TypeDef n1 ps1 t1 _) == (TypeDef n2 ps2 t2 _) = n1 == n2 && ps1 == ps2 && t1 == t2
+data Replacements = Replacements
+  { identifiers :: M.Map String (Maybe Expression, Expression)
+  , patterns :: [([BracketToken], (Maybe Expression, Expression))]
+  } deriving Show
+instance Eq Replacements where
+  _ == _ = True
+instance Ord Replacements where
+  compare _ _ = EQ
+data BracketToken = BracketIdentifier String (Maybe Expression)
+                  | BracketOperator String deriving Show
+data TypeDef = NewType [String] Replacements Type SourceRange
+             | Alias [String] Type SourceRange deriving Show
+
 -- TODO: More fancy pointers
 -- TODO: Find and prevent infinite recursive structures
 -- TODO: Function types
@@ -58,7 +67,6 @@ instance Uniplate Type where
   uniplate BoolT = plate BoolT
   uniplate (NamedT n ts) = plate NamedT |- n ||* ts
   uniplate (PointerT t) = plate PointerT |* t
-  uniplate (Memorychunk it cap t) = plate Memorychunk |* it |- cap |* t
   uniplate s@(StructT props) = plateProject from to s
     where
       from _ = snd <$> props
@@ -144,4 +152,3 @@ data LiteralT t = ILit Integer t SourceRange
                 | Undef t SourceRange
                 deriving Show
 -- TODO: struct literals
--- TODO: memorychunk literals

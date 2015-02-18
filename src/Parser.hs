@@ -1,4 +1,4 @@
-{-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE FlexibleContexts, TupleSections #-}
 
 module Parser (parseFile) where
 
@@ -11,6 +11,7 @@ import Text.Parsec.Expr
 import qualified Data.Text.Lazy as L
 import qualified Data.Text.Lazy.IO as LIO
 import qualified Data.Map as M
+import qualified Data.Set as S
 import qualified Text.Parsec.Token as T
 
 type StreamType = L.Text
@@ -33,7 +34,7 @@ langDef = T.LanguageDef
   , T.identLetter = alphaNum <|> char '_'
   , T.opStart = T.opLetter langDef
   , T.opLetter = oneOf "+-*/%<>=!^&|:,"
-  , T.reservedNames = ["defer", "if", "else", "while", "return", "break", "continue", "null", "mut", "func", "proc"]
+  , T.reservedNames = ["defer", "if", "else", "while", "return", "break", "continue", "null", "let", "mut", "func", "proc", "self"]
   , T.reservedOpNames =
     [ "-", "^", "&", "!", "*"
     , "/", "%", "+", "-", "<<"
@@ -199,25 +200,55 @@ numLit :: Parser (SourceRange -> Literal)
 numLit = either ILit FLit <$> naturalOrFloat <*> return UnknownT
 
 typeDef :: Parser Top
-typeDef = withPosition $ do
-  newType <- replace reserved "type" True <|> replace reserved "alias" False
-  makedef <$> identifier <*> def newType
+typeDef = uncurry TypeDefinition <$> (attachPosition newTypeDef <|> attachPosition aliasDef)
   where
-    makedef n d sr = TypeDefinition n $ d sr
-    def newType = TypeDef newType <$> typeParams <*> (reservedOp ":" >> typeLiteral)
+    newTypeDef = do
+      reserved "type"
+      ident <- identifier
+      tParams <- typeParams
+      makeReplacements <- braces $ do
+        hidden <- S.fromList <$> option [] (reserved "hide" >> commaSep identifier)
+        replacements <- foldParse replacement $ Replacements M.empty []
+        return $ let
+          removeHidden = filter (`S.notMember` hidden)
+          toReplacement n = (n, (Nothing, Variable n $ SourceRange (SourceLoc "t" 0 0) (SourceLoc "t" 0 0)))
+          merge ns = Replacements (identifiers replacements `M.union` ns) (patterns replacements)
+          in merge . M.fromList . map toReplacement . removeHidden
+      t <- typeLiteral
+      let canonIdentifiers = case t of
+            StructT ps -> map fst ps
+            _ -> [] -- TODO: pull names from NamedT as well
+      return (ident, NewType tParams (makeReplacements canonIdentifiers) t)
+    replacement (Replacements ids pats) = (flip Replacements pats <$> idPattern) <|> (Replacements ids . (: pats) <$> bracketPattern)
+      where
+        idPattern = M.insert <$> identifier <*> rightHand <*> return ids
+        bracketPattern = (,) <$> (brackets . many $ bracketId <|> bracketOp) <*> rightHand
+        bracketId = BracketIdentifier <$> identifier <*> optionMaybe (reservedOp "=" >> expression)
+        bracketOp = BracketOperator <$> operator
+        rightHand = (,) <$> optionMaybe (reservedOp "|" >> expression) <*> (reservedOp "->" >> expression)
+    aliasDef = do
+      reserved "alias"
+      ident <- identifier
+      fmap (ident, ) $ Alias <$> typeParams <*> typeLiteral
     typeParams = option [] . angles $ commaSep1 identifier
+    attachPosition p = do
+      start <- getPosition
+      (i, ret) <- p
+      (i, ) . ret <$> toSourceRange start <$> getPosition
+
+foldParse :: (a -> Parser a) -> a -> Parser a
+foldParse f prev = (f prev >>= foldParse f) <|> return prev
 
 typeLiteral :: Parser Type
 typeLiteral = simpleTypeLiteral
           <|> namedTypeLiteral
           <|> pointerTypeLiteral
-          <|> chunkTypeLiteral
           <|> structTypeLiteral
 
 simpleTypeLiteral :: Parser Type
 simpleTypeLiteral = uintTypeLiteral <|> remainingParser
   where
-    remainingParser = choice . map (uncurry $ replace reserved) $ typePairs
+    remainingParser = choice $ map (uncurry $ replace reserved) typePairs
     typePairs = [ ("I8", IntT S8)
                 , ("I16", IntT S16)
                 , ("I32", IntT S32)
@@ -243,10 +274,6 @@ namedTypeLiteral = NamedT <$> identifier <*> typeParams
 pointerTypeLiteral :: Parser Type
 pointerTypeLiteral = reservedOp "^" >> PointerT <$> typeLiteral
 
-chunkTypeLiteral :: Parser Type
-chunkTypeLiteral = Memorychunk <$> brackets countType <*> return True <*> typeLiteral
-  where countType = option (IntT S32) uintTypeLiteral
-
 structTypeLiteral :: Parser Type
 structTypeLiteral = braces $ StructT <$> property `sepEndBy` comma
   where property = (,) <$> identifier <*> (reservedOp ":" >> typeLiteral)
@@ -266,6 +293,9 @@ lexer = T.makeTokenParser langDef
 
 identifier :: Parser String
 identifier = T.identifier lexer
+
+operator :: Parser String
+operator = T.operator lexer
 
 reserved :: String -> Parser ()
 reserved = T.reserved lexer

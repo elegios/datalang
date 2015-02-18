@@ -24,7 +24,7 @@ import qualified LLVM.General.AST as AST
 import qualified Data.Map as M
 
 initialFuncState :: GenState -> FuncState
-initialFuncState currGenState = FuncState currGenState Nothing Nothing (Ret Nothing []) M.empty M.empty 0 [] entryBlock (Defers [] [] [])
+initialFuncState currGenState = FuncState currGenState Nothing Nothing (Ret Nothing []) M.empty M.empty M.empty 0 [] entryBlock (Defers [] [] [])
   where entryBlock = BasicBlock (Name "entry") [] . Do $ Ret Nothing []
 
 generateFunction :: Signature -> CodeGen (Either ErrorMessage AST.Definition)
@@ -49,7 +49,7 @@ generateFunction sig@(ProcSig fName inTs outTs) = do
 
 generateFunction sig@(FuncSig fName inTs outT) = do
   currGenState <- get
-  let initState = FuncState currGenState Nothing Nothing (Br (Name "returnBlock") []) M.empty M.empty 0 [] entryBlock (Defers [] [] [])
+  let initState = FuncState currGenState Nothing Nothing (Br (Name "returnBlock") []) M.empty M.empty M.empty 0 [] entryBlock (Defers [] [] [])
       entryBlock = BasicBlock (Name "entry") [] . Do $ Br (Name "returnBlock") []
       retBlock = BasicBlock (Name "returnBlock") [] . Do $ Ret Nothing []
       generateBody = do

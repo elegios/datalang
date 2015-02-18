@@ -1,6 +1,17 @@
-alias Tuple<a, b> : { a : a, b : b }
-type Tuple2<a, b> : { a : a, b : b }
-alias Tuple3<a> : { a : a, b : a }
+alias Tuple<a, b> { a : a, b : b }
+type Tuple2<a, b> {} { a : a, b : b }
+alias Tuple3<a> { a : a, b : a }
+
+type Array<i, t> {
+  hide ptr
+  [i] | 0 <= i && i < len -> ptr[i]
+  [s = 0 :: e = len] | 0 <= s && s <= e && e <= len -> s - e //no struct literals nor newtype conversions, so incorrect here
+} { len : i, cap : i, ptr : ^t }
+
+type RenameThing {
+  hide a
+  c -> a
+} { a : Bool, b : Bool}
 
 func main {
   ret int
@@ -19,7 +30,16 @@ func main {
   tup2.b = true
 
   let tup3 : Tuple3<ret>
-  let blub = tup == tup3
+  let mut blub = tup == tup3
+
+  let rt : RenameThing
+  blub = true
+  blub = rt.b
+  blub = rt.c
+  // blub = rt.a // will fail typechecking
 
   ret = tup.b * 10 + tup.a
+  if !blub {
+    ret = ret + 100
+  }
 }

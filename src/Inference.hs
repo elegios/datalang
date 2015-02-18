@@ -2,7 +2,7 @@
 
 module Inference (fullInfer, infer) where
 
-import Ast hiding (Type(..), Restriction, FuncDef, Expression, Statement)
+import Ast hiding (Type(..), Restriction, FuncDef, Expression, Statement, TypeDef(..))
 import Data.Functor ((<$>))
 import Data.STRef
 import Data.Tuple (swap)
@@ -34,38 +34,55 @@ data InferrerState s = InferrerState
   , _equals :: [[Inferred s]]
   }
 
--- FIXME: enter funcdefs as well
-
 -- TODO: support for typeclasses and similar stuff
+-- TODO: support newtyping newtypes with the original property names
 data Inferred s = IntT TSize
                 | UIntT TSize
                 | FloatT TSize
                 | BoolT
-                | NamedT String [Inferred s] NewType (Inferred s)
+                | NewType String [Inferred s] (Inferred s) Replacements
+                | Alias String [Inferred s] (Inferred s)
                 | PointerT (Inferred s)
-                | MemorychunkT (Inferred s) Bool (Inferred s)
                 | StructT [(String, Inferred s)]
-                | FunctionT [Inferred s] [Inferred s]
+                | FunctionT [Inferred s] (Inferred s)
+                | ProcT [Inferred s] [Inferred s]
                 | Ref (TVarRef s)
-                deriving (Eq, Show)
+                deriving Show
 data TVar s = Unbound (Restriction s) Changeable | Link (Inferred s) deriving (Eq, Show)
 type TVarRef s = STRef s (TVar s)
 instance Show (TVarRef s) where
   show _ = "tref"
+
+instance Eq (Inferred s) where
+  (IntT s1) == (IntT s2) = s1 == s2
+  (UIntT s1) == (UIntT s2) = s1 == s2
+  (FloatT s1) == (FloatT s2) = s1 == s2
+  BoolT == BoolT = True
+  (NewType n1 ts1 _ _) == (NewType n2 ts2 _ _) = n1 == n2 && ts1 == ts2
+  (Alias n1 ts1 _) == (Alias n2 ts2 _) = n1 == n2 && ts1 == ts2
+  (Alias _ _ t1) == t2 = t1 == t2
+  t1 == (Alias _ _ t2) = t1 == t2
+  (PointerT t1) == (PointerT t2) = t1 == t2
+  (StructT ps1) == (StructT ps2) = ps1 == ps2
+  (FunctionT i1 o1) == (FunctionT i2 o2) = i1 == i2 && o1 == o2
+  (ProcT i1 o1) == (ProcT i2 o2) = i1 == i2 && o1 == o2
+  (Ref tvar1) == (Ref tvar2) = tvar1 == tvar2
+  _ == _ = False
 
 instance Uniplate (Inferred s) where
   uniplate (IntT s) = plate IntT |- s
   uniplate (UIntT s) = plate UIntT |- s
   uniplate (FloatT s) = plate FloatT |- s
   uniplate BoolT = plate BoolT
-  uniplate (NamedT n ts nt t) = plate NamedT |- n ||* ts |- nt |* t
+  uniplate (Alias n ts t) = plate Alias |- n ||* ts |* t
+  uniplate (NewType n ts t rs) = plate NewType |- n ||* ts |* t |- rs
   uniplate (PointerT t) = plate PointerT |* t
-  uniplate (MemorychunkT it cap t) = plate MemorychunkT |* it |- cap |* t
   uniplate s@(StructT props) = plateProject fromStruct toStruct s
     where
       fromStruct _ = snd <$> props
       toStruct = StructT . zip (fst <$> props)
-  uniplate (FunctionT its ots) = plate FunctionT ||* its ||* ots
+  uniplate (FunctionT its ot) = plate FunctionT ||* its |* ot
+  uniplate (ProcT its ots) = plate ProcT ||* its ||* ots
   uniplate (Ref r) = plate Ref |- r
 instance Biplate [Inferred s] (Inferred s) where
   biplate (x:xs) = plate (:) |* x ||* xs
@@ -94,20 +111,16 @@ infer funcs types errs def = runST $ convertOutput <$> runStateT inference initS
 
 enterInfer :: CallableDefT Ast.Type -> Inferrer s (CallableDefT (Inferred s))
 enterInfer (Ast.ProcDef inTs outTs restrs ins outs body sr) = do
-  FunctionT inTs' outTs' <- convertFuncSig restrs inTs outTs Environment
-  zipWithM_ defineLocal (ins ++ outs) (inTs' ++ outTs')
+  ProcT inTs' outTs' <- convertProcSig restrs inTs outTs Environment
+  variables %= M.union (M.fromList $ zip (ins ++ outs) (inTs' ++ outTs'))
   body' <- enterStatement body
   return $ Ast.ProcDef inTs' outTs' restrs ins outs body' sr
-  where
-    defineLocal n t = variables . at n ?= t
 
 enterInfer (Ast.FuncDef inTs outT restrs ins out body sr) = do
-  FunctionT inTs' [outT'] <- convertFuncSig restrs inTs [outT] Environment
-  zipWithM_ defineLocal (out : ins) (outT' : inTs')
+  ProcT inTs' [outT'] <- convertProcSig restrs inTs [outT] Environment
+  variables %= M.union (M.fromList $ zip (out : ins) (outT' : inTs'))
   body' <- enterStatement body
   return $ Ast.FuncDef inTs' outT' restrs ins out body' sr
-  where
-    defineLocal n t = variables . at n ?= t
 
 enterStatement :: StatementT Ast.Type -> Inferrer s (StatementT (Inferred s))
 enterStatement (ProcCall pName inexprs outexprs sr) = do
@@ -318,9 +331,9 @@ convertBack errF inferred = case inferred of
       return Ast.UnknownT
     Unbound _ (Unchangeable n) -> return $ Ast.NamedT n []
     Link inf -> convertBack errF inf
-  NamedT n its _ _ -> Ast.NamedT n <$> mapM (convertBack errF) its
+  NewType n its _ _ -> Ast.NamedT n <$> mapM (convertBack errF) its
+  Alias n its _ -> Ast.NamedT n <$> mapM (convertBack errF) its
   PointerT it -> Ast.PointerT <$> convertBack errF it
-  MemorychunkT it1 cap it2 -> Ast.Memorychunk <$> convertBack errF it1 <*> return cap <*> convertBack errF it2
   StructT ps -> Ast.StructT <$> mapM propConvert ps
     where propConvert (n, it) = (n, ) <$> convertBack errF it
   -- (FunctionT its ots, _) -> Ast.Function <$> mapM (convertBack errF) its <*> mapM (convertBack errF) its -- TODO: re-add when adding function types
@@ -344,7 +357,7 @@ unifyExternalFunction sig sr = do
     errF inOut num m = ErrorString $ "Type mismatch in function " ++ inOut ++ " argument number " ++ show num ++  " at " ++ show sr ++ ": " ++ show m
     unifyArguments inOut ts' ts = sequence_ . getZipList $ unify <$> ZipList (errF inOut <$> [(1 :: Int)..]) <*> ZipList ts' <*> ZipList ts
     unifyWork restrs funcInTs funcOutTs inTs outTs = do
-      FunctionT funcInTs' funcOutTs' <- convertFuncSig restrs funcInTs funcOutTs Unbounds
+      ProcT funcInTs' funcOutTs' <- convertProcSig restrs funcInTs funcOutTs Unbounds
       when (length funcInTs /= length inTs) . addError . ErrorString $ "Wrong number of in arguments at " ++ show sr
       when (length funcOutTs /= length outTs) . addError . ErrorString $ "Wrong number of out arguments at " ++ show sr
       unifyArguments "in" funcInTs' inTs
@@ -379,22 +392,19 @@ unify errF t1 t2 = return t1 <* (considerEqual t1 t2 >>= flip unless innerUnify)
             (Link t, _) -> unifyRef t r2
       (Ref r, t) -> readRef r >>= linkCompression r >>= unifyRef t
       (t, Ref r) -> readRef r >>= linkCompression r >>= unifyRef t
-      (NamedT n1 t1s _ _, NamedT n2 t2s _ _) | n1 == n2 -> zipWithM_ (unify errF) t1s t2s
-      (NamedT _ _ nt1 _, NamedT _ _ nt2 _) | nt1 || nt2 ->
-        addError . errF $ "Incompatible types (" ++ show t1 ++ " != " ++ show t2 ++ ")"
-      (NamedT _ _ _ it, _) -> void $ unify errF it t2
-      (_, NamedT _ _ _ it) -> void $ unify errF t1 it
+      (NewType n1 t1s _ _, NewType n2 t2s _ _) | n1 == n2 -> zipWithM_ (unify errF) t1s t2s
+      (Alias n1 t1s _, Alias n2 t2s _) | n1 == n2 -> zipWithM_ (unify errF) t1s t2s
       (PointerT i1, PointerT i2) -> void $ unify errF i1 i2
-      (MemorychunkT r11 c1 r12, MemorychunkT r21 c2 r22) | c1 == c2 -> do
-        unify errF r11 r21
-        void $ unify errF r12 r22
       (StructT p1, StructT p2) | p1names == p2names -> zipWithM_ (unify errF) p1types p2types
         where
           (p1names, p1types) = unzip p1
           (p2names, p2types) = unzip p2
-      (FunctionT i1 o1, FunctionT i2 o2) | length i1 == length i2 && length o1 == length o2 -> do
+      (ProcT i1 o1, ProcT i2 o2) | length i1 == length i2 && length o1 == length o2 -> do
         zipWithM_ (unify errF) i1 i2
         zipWithM_ (unify errF) o1 o2
+      (FunctionT i1 o1, FunctionT i2 o2) | length i1 == length i2 -> do
+        zipWithM_ (unify errF) i1 i2
+        void $ unify errF o1 o2
       _ -> addError . errF $ "Incompatible types (" ++ show t1 ++ " != " ++ show t2 ++ ")"
 
 considerEqual :: Inferred s -> Inferred s -> Inferrer s Bool
@@ -411,8 +421,10 @@ considerEqual a b
 restrict :: UnifyErrorFunction -> Restriction s -> Inferred s -> Inferrer s (Inferred s)
 restrict errF restr inferred = return inferred <* applyRestriction errF inferred restr
 
+-- TODO: applyRestriction for newtypes
 applyRestriction :: UnifyErrorFunction -> Inferred s -> Restriction s -> Inferrer s ()
 applyRestriction _ _ NoRestriction = return ()
+applyRestriction errF (Alias _ _ t) restr = applyRestriction errF t restr
 
 applyRestriction errF t@(Ref r) restr = readRef r >>= \tvar -> case tvar of
   Link inf -> applyRestriction errF inf restr
@@ -461,8 +473,6 @@ applyRestriction errF t@(StructT origPs) (PropertiesR restrPs) = recurse origPs 
     recurse _ [] = return ()
     recurse [] restrs = addError . errF $ "Unsatisfied property requirement: " ++ show t ++ " lacks properties " ++ show restrs
 
-applyRestriction errF (NamedT _ _ _ t) restr = applyRestriction errF t restr
-
 applyRestriction errF t restr = addError . errF $ "Could not apply restriction " ++ show restr ++ " on type " ++ show t
 
 accessProperty :: UnifyErrorFunction -> String -> Inferred s -> Inferrer s (Inferred s)
@@ -488,7 +498,21 @@ accessProperty errF member inferred = case inferred of
     u -> do
       addError . errF $ show u ++ " cannot have a property " ++ member
       newUnbound NoRestriction
-  NamedT _ _ _ t -> accessProperty errF member t
+  NewType n _ t (Replacements repPs _) -> case M.lookup member repPs of
+    Nothing -> do
+      addError . errF $ "Type " ++ n ++ " does not have a property " ++ member
+      newUnbound NoRestriction
+    Just (_, expr) -> do
+      prevVariables <- variables <<%= M.union (M.fromList names)
+      variables . at "self" ?= t
+      resultType <- snd <$> enterExpression expr
+      variables .= prevVariables
+      return resultType
+    where
+      names = case t of
+        StructT ps -> ps
+        _ -> []
+  Alias _ _ t -> accessProperty errF member t
   t -> do
     addError . errF $ "Type " ++ show t ++ " cannot have a property"
     newUnbound NoRestriction
@@ -531,20 +555,26 @@ convert t = case t of
       newUnbound NoRestriction
   _ -> case t of
     Ast.NamedT n@(c:_) its | isUpper c -> use (typeDefs . at n) >>= \mDef -> case mDef of
-      Just (TypeDef nt params origT _) | length params == length its -> do
-        its' <- mapM convert its
-        prevTypeVars <- typeVariables <<%= M.union (M.fromList $ zip params its')
-        origT' <- convert origT
-        typeVariables .= prevTypeVars
-        return $ NamedT n its' nt origT'
-      Just (TypeDef _ params _ _) -> do
-        addError . ErrorString $ "Incorrect instantiation of type '" ++ n ++ "', wrong number of parameters (" ++ show (length its) ++ " != " ++ show (length params) ++ ")"
-        newUnbound NoRestriction
+      Just (Ast.Alias params origT _) | length params == length its ->
+        constructNamedT Alias params origT
+      Just (Ast.NewType params reps origT _) | length params == length its ->
+        constructNamedT NewType params origT <*> return reps
+      Just (Ast.Alias params _ _) -> errF params
+      Just (Ast.NewType params _ _ _) -> errF params
       Nothing -> do
         addError . ErrorString $ "Unknown named type '" ++ n ++ "'"
         newUnbound NoRestriction
+      where
+        constructNamedT f params origT = do
+          its' <- mapM convert its
+          prevTypeVars <- typeVariables <<%= M.union (M.fromList $ zip params its')
+          origT' <- convert origT
+          typeVariables .= prevTypeVars
+          return $ f n its' origT'
+        errF params = do
+          addError . ErrorString $ "Incorrect instantiation of type '" ++ n ++ "', wrong number of parameters (" ++ show (length its) ++ " != " ++ show (length params) ++ ")"
+          newUnbound NoRestriction
     Ast.PointerT it -> PointerT <$> convert it
-    Ast.Memorychunk indexT hasCap it -> MemorychunkT <$> convert indexT <*> return hasCap <*> convert it
     Ast.StructT props -> StructT <$> mapM propConvert props
     Ast.UnknownT -> newUnbound NoRestriction
     _ -> simpleConvert
@@ -556,8 +586,8 @@ convert t = case t of
       Ast.FloatT s -> FloatT s
       Ast.BoolT -> BoolT
 
-convertFuncSig :: [(String, Ast.Restriction)] -> [Ast.Type] -> [Ast.Type] -> TypeVarTarget -> Inferrer s (Inferred s)
-convertFuncSig restrs inTs outTs target = do
+convertProcSig :: [(String, Ast.Restriction)] -> [Ast.Type] -> [Ast.Type] -> TypeVarTarget -> Inferrer s (Inferred s)
+convertProcSig restrs inTs outTs target = do
   prevTypeVars <- typeVariables <<.= M.empty
   defineTypeVars
   inTs' <- mapM convert inTs
@@ -572,7 +602,7 @@ convertFuncSig restrs inTs outTs target = do
     Environment -> typeVariables %= M.union prevTypeVars
     Unbounds -> typeVariables .= prevTypeVars
 
-  return $ FunctionT inTs' outTs'
+  return $ ProcT inTs' outTs'
   where
     forceRestrict errF restr inferred@(Ref r) = do
       oldChangeable <- setChangeable r Changeable

@@ -7,6 +7,7 @@ import CodeGen.FuncGen
 import CodeGen.Basics
 import Data.Functor ((<$>))
 import Data.Word (Word32)
+import Data.List (find)
 import Control.Lens hiding (op, index, parts, transform)
 import Control.Monad.Except
 import LLVM.General.AST.Operand
@@ -18,43 +19,26 @@ import qualified LLVM.General.AST.CallingConvention as CC
 import qualified LLVM.General.AST.Constant as C
 import qualified LLVM.General.AST as AST
 import qualified LLVM.General.AST.Float as F
+import qualified Data.Map as M
 
 type LLVMOperator = Operand -> Operand -> InstructionMetadata -> Instruction
 
 generateExpression :: Expression -> FuncGen FuncGenOperand
 generateExpression (Variable vName sr) =
-  use (locals . at vName) >>= justErr (ErrorString $ "Compiler error: Unknown variable " ++ vName ++ " at " ++ show sr)
+  use (usingLocals . at vName) >>= \mFop -> case mFop of
+    Just fop -> accessProperty vName sr fop
+    Nothing -> use (locals . at vName) >>= justErr (ErrorString $ "Compiler error: Unknown variable " ++ vName ++ " at " ++ show sr)
 
-generateExpression (MemberAccess expression mName sr) =
-  generateExpression expression >>= derefPointer >>= bottomGeneration
-  where
-    derefPointer (op, t, mutable) = do
-      realT <- ensureTopNotNamed t
-      case realT of
-        PointerT innerT -> do
-          llvmtype <- toLLVMType mutable innerT
-          innerOp <- instr (Load False op Nothing 0 [], llvmtype)
-          derefPointer (innerOp, innerT, mutable)
-        _ -> return (op, realT, mutable)
-    bottomGeneration (bottomOp, bottomType, mutable) = do
-      (index, t) <- findMemberIndex mName bottomType sr
-      realT <- ensureTopNotNamed t
-      llvmtype <- toLLVMType mutable realT
-      op <- instr (accessOp bottomOp index mutable, llvmtype)
-      return (op, realT, mutable)
-    accessOp bottomOp index mutable = if mutable
-      then I.GetElementPtr False bottomOp [constInt 0, constInt index] []
-      else ExtractValue bottomOp [fromInteger index] []
-    constInt = ConstantOperand . C.Int 32
+generateExpression (MemberAccess expression mName sr) = generateExpression expression >>= accessProperty mName sr
 
-generateExpression (Subscript chunk index _) = do
-  c@(_, Memorychunk _ hasCap innerT, mutable) <- generateExpression chunk
-  (chunkOp, _, _) <- toImmutable c
-  llvmtype <- toLLVMType True innerT
-  ptrOp <- instr (ExtractValue chunkOp [boolean 2 1 hasCap] [], llvmtype)
-  (indexOp, _, _) <- generateExpression index >>= toImmutable
-  elementOp <- instr (I.GetElementPtr False ptrOp [indexOp] [], llvmtype)
-  boolean return toImmutable mutable (elementOp, innerT, True)
+-- generateExpression (Subscript chunk index _) = do -- TODO: generate []-expressions properly
+--   c@(_, Memorychunk _ hasCap innerT, mutable) <- generateExpression chunk
+--   (chunkOp, _, _) <- toImmutable c
+--   llvmtype <- toLLVMType True innerT
+--   ptrOp <- instr (ExtractValue chunkOp [boolean 2 1 hasCap] [], llvmtype)
+--   (indexOp, _, _) <- generateExpression index >>= toImmutable
+--   elementOp <- instr (I.GetElementPtr False ptrOp [indexOp] [], llvmtype)
+--   boolean return toImmutable mutable (elementOp, innerT, True)
 
 generateExpression (ExprLit lit _) = case lit of
   ILit val t _ -> do
@@ -125,6 +109,7 @@ generateExpression (Bin operator exp1 exp2 sr) = do
 generateExpression (Zero t) = toLLVMType False t >> (, t, False) . ConstantOperand <$> generateZero t
   where
     generateZero :: Type -> FuncGen C.Constant
+    generateZero (NewTypeT _ _ it) = generateZero it
     generateZero named@NamedT{} = ensureTopNotNamed named >>= generateZero
     generateZero (StructT ps) = do
       Just (AST.TypeDefinition n _, _) <- use (genState . structTypes . at (snd <$> ps))
@@ -223,6 +208,42 @@ binOp operator (op1, t1, _) (op2, _, _) = do
   res <- instr (operator op1 op2 [], llvmt)
   return (res, t1, False)
 
+accessProperty :: String -> SourceRange -> FuncGenOperand -> FuncGen FuncGenOperand
+accessProperty mName sr = derefPointer >=> bottomGeneration
+  where
+    derefPointer (op, t, mutable) = do
+      realT <- ensureTopNotNamed t
+      case realT of
+        PointerT innerT -> do
+          llvmtype <- toLLVMType mutable innerT
+          innerOp <- instr (Load False op Nothing 0 [], llvmtype)
+          derefPointer (innerOp, innerT, mutable)
+        _ -> return (op, realT, mutable)
+    accessOp bottomOp index mutable = if mutable
+      then I.GetElementPtr False bottomOp [constInt 0, constInt index] []
+      else ExtractValue bottomOp [fromInteger index] []
+    constInt = ConstantOperand . C.Int 32
+    bottomGeneration (bottomOp, StructT fields, mutable) = case find (\(_, (n, _)) -> n == mName) $ zip [0..] fields of
+      Nothing -> throwError . ErrorString $ "Compiler error: Unknown member field " ++ mName ++ " in struct at " ++ show sr
+      Just (i, (_, t)) -> do
+        realT <- ensureTopNotNamed t
+        llvmtype <- toLLVMType mutable realT
+        op <- instr (accessOp bottomOp i mutable, llvmtype)
+        return (op, realT, mutable)
+    bottomGeneration (bottomOp, NewTypeT n (Replacements fields _) it, mutable) = case M.lookup mName fields of
+      Nothing -> throwError . ErrorString $ "Compiler error: Unknown member field " ++ mName ++ " in type " ++ n ++ " at " ++ show sr
+      Just (_, expr) -> do -- TODO: generate runtimechecks
+        prevUsingLocals <- usingLocals <<%= M.union (M.fromList names)
+        prevLocals <- locals <<%= M.insert "self" (bottomOp, it, mutable)
+        res <- generateExpression expr
+        usingLocals .= prevUsingLocals
+        locals .= prevLocals
+        return res
+      where
+        names = case it of
+          StructT ps -> (_2 .~ (bottomOp, it, mutable)) <$> ps
+          _ -> []
+
 toImmutable :: FuncGenOperand -> FuncGen FuncGenOperand
 toImmutable res@(_, _, False) = return res
 toImmutable (op, t, True) = do
@@ -241,3 +262,5 @@ getSize :: Type -> Word32
 getSize (IntT s) = sizeToWord32 s
 getSize (UIntT s) = sizeToWord32 s
 getSize (FloatT s) = sizeToWord32 s
+getSize BoolT = 1
+getSize t = error $ "We should never want to find the size of " ++ show t

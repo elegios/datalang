@@ -6,8 +6,7 @@ import Ast
 import CodeGen.Basics
 import Data.Maybe
 import Data.Functor ((<$>))
-import Data.Char (isUpper)
-import Data.List
+import Data.Char (isUpper, isLower)
 import Data.Word
 import Data.Generics.Uniplate.Direct
 import Control.Lens hiding (op, index, parts, transform)
@@ -28,6 +27,7 @@ data FuncState = FuncState
   , _continueTarget :: Maybe Name
   , _retTerminator :: Terminator
   , _locals :: M.Map String FuncGenOperand
+  , _usingLocals :: M.Map String FuncGenOperand
   , _typeVariables :: M.Map String Type
   , _nextFresh :: Word
   , _finalizedBlocks :: [BasicBlock]
@@ -113,11 +113,12 @@ ensureTopNotNamed (NamedT tName@(c:_) ts) | isUpper c = do
   mType <- uses (genState . source) $ M.lookup tName . typeDefinitions
   case mType of
     Nothing -> throwError . ErrorString $ "Compiler error: Unknown type " ++ tName
-    Just (TypeDef _ tNames it _) -> return $ transform replaceParamTypes it
-      where
-        translation = M.fromList $ zip tNames ts
-        replaceParamTypes x@(NamedT innerTName []) = fromMaybe x $ M.lookup innerTName translation
-        replaceParamTypes x = x
+    Just (NewType tNames reps it _) -> return . NewTypeT tName reps $ transform (replaceParamTypes $ makeTranslation tNames) it
+    Just (Alias tNames it _) -> return $ transform (replaceParamTypes $ makeTranslation tNames) it
+  where
+    replaceParamTypes translation x@(NamedT innerTName@(ic:_) []) | isLower ic = fromMaybe x $ M.lookup innerTName translation
+    replaceParamTypes _ x = x
+    makeTranslation tNames = M.fromList $ zip tNames ts
 ensureTopNotNamed (NamedT tName []) =
   use (typeVariables . at tName) >>= maybe err ensureTopNotNamed
   where err = throwError . ErrorString $ "Compiler error: Unknown typevariable " ++ tName
@@ -125,6 +126,7 @@ ensureTopNotNamed x = return x
 
 toLLVMType :: Bool -> Type -> FuncGen T.Type
 toLLVMType mutable nt = ensureTopNotNamed nt >>= \t -> case t of
+  NewTypeT _ _ it -> toLLVMType mutable it
   StructT props -> do
     mType <- use $ genState . structTypes . at (snd <$> props)
     case mType of
@@ -151,15 +153,6 @@ toLLVMType mutable nt = ensureTopNotNamed nt >>= \t -> case t of
 
     BoolT -> T.i1
     _ -> error $ "Compiler error: attempted to convert a basic type that might not have been so basic: " ++ show t
-
-findMemberIndex :: String -> Type -> SourceRange -> FuncGen (Integer, Type)
-findMemberIndex mName (StructT fields) sr = case find (\(_, (n, _)) -> n == mName) $ zip [0..] fields of
-  Just (i, (_, t)) -> return (i, t)
-  Nothing -> throwError . ErrorString $ "Compiler error: Unknown member field " ++ mName ++ " in struct at " ++ show sr
-findMemberIndex mName (Memorychunk iType _ _) _ = return . (, iType) $ case mName of
-  "len" -> 0
-  "cap" -> 1
-findMemberIndex _ _ sr = throwError . ErrorString $ "Compiler error: Attempt to access member field of non-struct type at " ++ show sr
 
 opOp :: FuncGenOperand -> Operand
 opOp (a, _, _) = a
