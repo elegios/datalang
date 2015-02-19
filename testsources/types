@@ -5,7 +5,7 @@ alias Tuple3<a> { a : a, b : a }
 type Array<i, t> {
   hide ptr
   [i] | 0 <= i && i < len -> ptr[i]
-  [s = 0 :: e = len] | 0 <= s && s <= e && e <= len -> s - e //no struct literals nor newtype conversions, so incorrect here
+  [s = 0 :: e = len] | 0 <= s && s <= e && e <= len -> e - s //no struct literals nor newtype conversions, so incorrect here
 } { len : i, cap : i, ptr : ^t }
 
 type RenameThing {
@@ -17,29 +17,46 @@ func main {
   ret int
 } -> ret
   -> ret {
-  let mut tup
   {
-    tup.b = 42
-    tup.a = 2
+    let mut tup
+    {
+      tup.b = 42
+      tup.a = 2
+    }
+    tup.a = 4
+    tup.b = 3
+
+    let mut tup2 : Tuple2<I64, Bool>
+    tup2.a = 42
+    tup2.b = true
+
+    let tup3 : Tuple3<ret>
+    let mut blub = tup == tup3
+
+    ret = tup.b * 10 + tup.a
   }
-  tup.a = 4
-  tup.b = 3
+  // ret is here 34
 
-  let mut tup2 : Tuple2<I64, Bool>
-  tup2.a = 42
-  tup2.b = true
+  {
+    let rt : RenameThing
+    let mut blub
 
-  let tup3 : Tuple3<ret>
-  let mut blub = tup == tup3
+    blub = true
+    blub = rt.b
+    blub = rt.c
+    // blub = rt.a // will fail typechecking
 
-  let rt : RenameThing
-  blub = true
-  blub = rt.b
-  blub = rt.c
-  // blub = rt.a // will fail typechecking
-
-  ret = tup.b * 10 + tup.a
-  if !blub {
-    ret = ret + 100
+    if !blub {
+      ret = ret + 100
+    }
   }
+  // ret is here 134
+
+  {
+    let mut ary : Array<ret, Bool>
+    ary.cap = 10
+    ary.len = 10
+    ret = ret + ary[::]
+  }
+  // ret is here 144 (until correct impl of array slicing)
 }

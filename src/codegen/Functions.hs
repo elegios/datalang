@@ -67,7 +67,7 @@ generateFunction sig@(FuncSig fName inTs outT) = do
         generateStatement stmnt
 
         finalizeAndReplaceWith retBlock
-        (retOp, _, _) <- generateExpression (Variable outname undefined) >>= toImmutable
+        (retOp, _, _) <- generateExpression (Variable outname nowhere) >>= toImmutable
         currentBlock . blockTerminator .= (Do $ Ret (Just retOp) [])
 
         toLLVMType False outT >>= constructFunctionDeclaration sig params

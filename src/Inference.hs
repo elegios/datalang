@@ -220,7 +220,14 @@ enterExpression (MemberAccess expr member sr) = do
   return . (, memberTref) $ MemberAccess expr' member sr
   where errF m = ErrorString $ "Expression at " ++ show sr ++ " has no property " ++ member ++ ". " ++ show m
 
-enterExpression Subscript{} = undefined -- TODO: subscript restriction
+enterExpression (Subscript expr brExprs sr) = do
+  (expr', t) <- enterExpression expr
+  (brExprs', retT) <- mapM enterBracketExpr brExprs >>= accessBracket errF t
+  return (Subscript expr' brExprs' sr, retT)
+  where
+    enterBracketExpr (BracketExpr brExpr isr) = (_1 %~ flip BracketExpr isr) <$> enterExpression brExpr
+    enterBracketExpr (BracketExprOp op isr) = return (BracketExprOp op isr, undefined)
+    errF m = ErrorString $ "Expression at " ++ show sr ++ " has no []-expression matching the one given. " ++ show m
 
 enterExpression (Variable vName sr) =
   use (variables . at vName) >>= (fmap (Variable vName sr, ) . maybe notFound return)
@@ -298,8 +305,11 @@ exitExpression (Un op expr sr) =
   Un op <$> exitExpression expr <*> return sr
 exitExpression (MemberAccess expr prop sr) =
   MemberAccess <$> exitExpression expr <*> return prop <*> return sr
-exitExpression (Subscript exp1 exp2 sr) =
-  Subscript <$> exitExpression exp1 <*> exitExpression exp2 <*> return sr
+exitExpression (Subscript exp1 brExprs sr) =
+  Subscript <$> exitExpression exp1 <*> mapM exitBracketExpr brExprs <*> return sr
+  where
+    exitBracketExpr (BracketExpr expr isr) = BracketExpr <$> exitExpression expr <*> return isr
+    exitBracketExpr (BracketExprOp op isr) = return $ BracketExprOp op isr
 exitExpression (Variable n sr) = return $ Variable n sr
 exitExpression (FuncCall n ins t sr) =
   FuncCall n <$> mapM exitExpression ins <*> convertBack (exitError sr) t <*> return sr
@@ -363,6 +373,7 @@ unifyExternalFunction sig sr = do
       unifyArguments "in" funcInTs' inTs
       unifyArguments "out" funcOutTs' outTs
 
+-- BUG: if a previously unbound with a restriction with a []-expression is unified with a newtype and that []-expression fits in such a way that a default is used, and that default needs type inference to get a fully specified type (for example 0) codegen will die with a type error despite inference succeeding
 unify :: UnifyErrorFunction -> Inferred s -> Inferred s -> Inferrer s (Inferred s)
 unify errF t1 t2 = return t1 <* (considerEqual t1 t2 >>= flip unless innerUnify)
   where
@@ -437,8 +448,10 @@ applyRestriction errF t@(Ref r) restr = readRef r >>= \tvar -> case tvar of
       then writeRef r $ Unbound (NumR spec') Changeable
       else addError . errF $ "Could not apply restriction " ++ show restr ++ " on type " ++ show t ++ " (" ++ show u ++ ")"
     _ -> addError . errF $ "Could not apply restriction " ++ show restr ++ " on type " ++ show t ++ " (" ++ show u ++ ")"
-  u@(Unbound (PropertiesR origPs) changeable) -> case restr of
-    PropertiesR restrPs -> recurse origPs restrPs >>= when (changeable == Changeable) . writeRef r . (\ps -> Unbound (PropertiesR ps) changeable)
+  u@(Unbound (PropertiesR origPs origBrackets) changeable) -> case restr of
+    PropertiesR restrPs restrBrackets -> do
+      newPs <- recurse origPs restrPs
+      when (changeable == Changeable) . writeRef r $ Unbound (PropertiesR newPs $ restrBrackets ++ origBrackets) changeable
     _ -> addError . errF $ "Could not apply restriction " ++ show restr ++ " on type " ++ show t ++ " (" ++ show u ++ ")"
     where
       recurse allOrigs@(op@(opName, opR) : origTail) allRestrs@(rp@(rpName, rpR) : restrTail) -- NOTE: essentially a merge sort
@@ -462,7 +475,17 @@ applyRestriction _ (FloatT _) (NumR spec)
   | spec == NoSpec = return ()
   | spec == FloatSpec = return ()
 
-applyRestriction errF t@(StructT origPs) (PropertiesR restrPs) = recurse origPs restrPs
+applyRestriction errF (PointerT t) (PropertiesR ps brackets) = do
+  case mapM exprOnly brackets of
+    Just restrictInts -> sequence_ restrictInts
+    Nothing -> addError . errF $ "A pointer only supports [int]"
+  applyRestriction errF t $ PropertiesR ps []
+  where
+    exprOnly :: ([Either a b], Inferred s) -> Maybe (Inferrer s ())
+    exprOnly ([Right _], it) = Just $ applyRestriction errF it (NumR IntSpec)
+    exprOnly _ = Nothing
+
+applyRestriction errF t@(StructT origPs) (PropertiesR restrPs []) = recurse origPs restrPs
   where
     recurse allOrigs@((opName, opR) : origTail) allRestrs@((rpName, rpR) : restrTail)
       | opName == rpName = unify errF opR rpR >> recurse origTail restrTail -- TODO: this is basically the exact same thing as accessProperty, should probably be defined at the same place
@@ -477,6 +500,7 @@ applyRestriction errF t restr = addError . errF $ "Could not apply restriction "
 
 accessProperty :: UnifyErrorFunction -> String -> Inferred s -> Inferrer s (Inferred s)
 accessProperty errF member inferred = case inferred of
+  Alias _ _ t -> accessProperty errF member t
   PointerT inf -> accessProperty errF member inf
   StructT ps -> case lookup member ps of
     Just prop -> return prop
@@ -487,13 +511,13 @@ accessProperty errF member inferred = case inferred of
     Link inf -> accessProperty errF member inf
     Unbound NoRestriction Changeable -> do
       innerInferred <- newUnbound NoRestriction
-      writeRef r $ Unbound (PropertiesR [(member, innerInferred)]) Changeable
+      writeRef r $ Unbound (PropertiesR [(member, innerInferred)] []) Changeable
       return innerInferred
-    Unbound (PropertiesR ps) _ -> case lookup member ps of
+    Unbound (PropertiesR ps _) _ -> case lookup member ps of
       Just prop -> return prop
       Nothing -> do
         innerInferred <- newUnbound NoRestriction
-        applyRestriction errF inferred $ PropertiesR [(member, innerInferred)]
+        applyRestriction errF inferred $ PropertiesR [(member, innerInferred)] []
         return innerInferred
     u -> do
       addError . errF $ show u ++ " cannot have a property " ++ member
@@ -512,10 +536,53 @@ accessProperty errF member inferred = case inferred of
       names = case t of
         StructT ps -> ps
         _ -> []
-  Alias _ _ t -> accessProperty errF member t
   t -> do
     addError . errF $ "Type " ++ show t ++ " cannot have a property"
     newUnbound NoRestriction
+
+accessBracket :: UnifyErrorFunction -> Inferred s -> [(BracketExprT (Inferred s), Inferred s)] -> Inferrer s ([BracketExprT (Inferred s)], Inferred s)
+accessBracket errF t pat = case t of
+  Alias _ _ it -> accessBracket errF it pat
+  PointerT it -> case pat of
+    [(BracketExpr _ _, exprT)] -> applyRestriction errF exprT (NumR IntSpec) >> return (fst <$> pat, it)
+    _ -> do
+      addError . errF $ show t ++ " only supports [int]"
+      (fst <$> pat,) <$> newUnbound NoRestriction
+  Ref r -> readRef r >>= \tvar -> case tvar of
+    Link it -> accessBracket errF it pat
+    Unbound NoRestriction Changeable -> do
+      innerInferred <- newUnbound NoRestriction
+      writeRef r $ Unbound (PropertiesR [] [(toRestr <$> pat, innerInferred)]) Changeable
+      return (fst <$> pat, innerInferred)
+    where
+      toRestr (BracketExpr _ _, resultT) = Right resultT
+      toRestr (BracketExprOp op _, _) = Left op
+  NewType _ _ it (Replacements _ pats) -> case foldl mplus Nothing . map (patternMatch pat) $ pats of
+    Nothing -> do
+      addError . errF $ show t ++ " has no matching []-pattern"
+      (fst <$> pat,) <$> newUnbound NoRestriction
+    Just runPattern -> do
+      prevVariables <- variables <<%= M.union (M.fromList names)
+      variables . at "self" ?= it
+      runPattern <* (variables .= prevVariables)
+    where
+      names = case it of
+        StructT ps -> ps
+        _ -> []
+      patternMatch supplied (pattern, (_, expr)) = (\cont -> (,) <$> cont <*> (snd <$> enterExpression expr)) <$> recurse supplied pattern
+      recurse :: [(BracketExprT (Inferred s), Inferred s)] -> [BracketToken] -> Maybe (Inferrer s [BracketExprT (Inferred s)])
+      recurse [] [] = Just $ return []
+      recurse (brExpr@(BracketExpr _ _, supT):supplied) (BracketIdentifier ident _:pattern) = (\cont -> do
+        variables . at ident ?= supT
+        (fst brExpr :) <$> cont) <$> recurse supplied pattern
+      recurse supplied (BracketIdentifier ident (Just expr):pattern) = (\cont -> do
+        (expr', exprT) <- enterExpression expr
+        variables . at ident ?= exprT
+        (BracketExpr expr' nowhere :) <$> cont) <$> recurse supplied pattern
+      recurse (brExpr@(BracketExprOp supOp _, _):supplied) (BracketOperator op:pattern)
+        | supOp == op = fmap (fst brExpr :) <$> recurse supplied pattern
+        | otherwise = Nothing
+      recurse _ _ = Nothing
 
 makePointer :: UnifyErrorFunction -> Inferred s -> Inferrer s (Inferred s)
 makePointer errF inferred = case inferred of
@@ -526,13 +593,14 @@ makePointer errF inferred = case inferred of
       innerInferred <- newUnbound NoRestriction
       writeRef r . Link $ PointerT innerInferred
       return innerInferred
-    Unbound restr@(PropertiesR _) Changeable -> do
-      innerInferred <- newUnbound restr
+    Unbound restr@PropertiesR{} Changeable -> do
+      innerInferred <- newUnbound NoRestriction
+      applyRestriction errF (PointerT innerInferred) restr
       writeRef r . Link $ PointerT innerInferred
       return innerInferred
     u -> do
       addError . errF $ show u ++ " cannot be a pointer"
-      newUnbound NoRestriction
+      newUnbound NoRestriction -- TODO: this is a common pattern, extract it
   t -> do
     addError . errF $ "Type " ++ show t ++ " does not unify with a pointer"
     newUnbound NoRestriction
@@ -620,8 +688,12 @@ convertRestriction :: Ast.Restriction -> Inferrer s (Restriction s)
 convertRestriction NoRestriction = return NoRestriction
 convertRestriction UIntR = return UIntR
 convertRestriction (NumR s) = return $ NumR s
-convertRestriction (PropertiesR ps) = PropertiesR <$> mapM propConvert ps
-  where propConvert (n, p) = (n, ) <$> convert p
+convertRestriction (PropertiesR ps brackets) = PropertiesR <$> mapM propConvert ps <*> mapM bracketConvert brackets
+  where
+    propConvert (n, p) = (n, ) <$> convert p
+    bracketConvert (tokens, t) = (,) <$> mapM (extractMonad . fmap convert) tokens <*> convert t
+    extractMonad (Right a) = Right <$> a
+    extractMonad (Left a) = return $ Left a
 
 newUnbound :: Restriction s -> Inferrer s (Inferred s)
 newUnbound restr = lift . fmap Ref . newSTRef $ Unbound restr Changeable

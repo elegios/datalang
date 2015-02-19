@@ -12,6 +12,9 @@ type Line = Int
 type Column = Int
 data SourceRange = SourceRange SourceLoc SourceLoc
 
+nowhere :: SourceRange
+nowhere = SourceRange (SourceLoc "nowhere" 0 0) (SourceLoc "nowhere" 0 0)
+
 instance Show SourceRange where
   show (SourceRange start@(SourceLoc f _ _) end) = f ++ "(" ++ pos start ++ " - " ++ pos end ++ ")"
     where pos (SourceLoc _ l c) = show l ++ ":" ++ show c
@@ -77,7 +80,7 @@ instance Biplate [Type] (Type) where
 
 type Restriction = RestrictionT Type
 data RestrictionT t = NoRestriction
-                    | PropertiesR [(String, t)]
+                    | PropertiesR [(String, t)] [([Either String t], t)]
                     | UIntR
                     | NumR NumSpec
                     deriving (Show, Eq)
@@ -126,13 +129,17 @@ type Expression = ExpressionT Type
 data ExpressionT t = Bin BinOp (ExpressionT t) (ExpressionT t) SourceRange
                    | Un UnOp (ExpressionT t) SourceRange
                    | MemberAccess (ExpressionT t) String SourceRange
-                   | Subscript (ExpressionT t) (ExpressionT t) SourceRange
+                   | Subscript (ExpressionT t) [BracketExprT t] SourceRange
                    | Variable String SourceRange
                    | FuncCall String [ExpressionT t] t SourceRange
                    | ExprLit (LiteralT t) SourceRange
                    | TypeAssertion Expression Type SourceRange
                    | Zero t
                    deriving Show
+type BracketExpr = BracketExprT Type
+data BracketExprT t = BracketExpr (ExpressionT t) SourceRange
+                    | BracketExprOp String SourceRange
+                    deriving Show
 -- TODO: Bitcast, conversion.
 -- TODO: Allow calling of functionpointers
 

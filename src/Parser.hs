@@ -39,7 +39,7 @@ langDef = T.LanguageDef
     [ "-", "^", "&", "!", "*"
     , "/", "%", "+", "-", "<<"
     , ">>", ">>>", "|", "<"
-    , ">", "<=", ">=", ":"
+    , ">", "<=", ">=", ":", "="
     , "==", "!=", "&&", "||"
     ]
   }
@@ -88,7 +88,7 @@ restriction = (,) <$> identifier <*> (numR <|> uintR <|> propertiesR)
        <|> replace reserved "int" (NumR IntSpec)
        <|> replace reserved "float" (NumR FloatSpec)
     uintR = replace reserved "uint" UIntR
-    propertiesR = (\(StructT ps) -> PropertiesR ps) <$> structTypeLiteral
+    propertiesR = (\(StructT ps) -> PropertiesR ps) <$> structTypeLiteral <*> return []
 
 statement :: Parser Statement
 statement = procCall
@@ -141,7 +141,6 @@ varInit = withPosition (VarInit <$> (reserved "let" >> mutable) <*> identifier <
 expression :: Parser Expression
 expression = buildExpressionParser expressionTable simpleExpression <?> "expression"
 
--- TODO: add all operators in here to the reservedOp list
 -- TODO: implement all operators, or implement them as something else
 expressionTable :: [[Operator StreamType StateType UnderlyingMonad Expression]]
 expressionTable =
@@ -182,7 +181,10 @@ memberAccess :: Expression -> Parser Expression
 memberAccess expr = withPosition $ dot >> MemberAccess expr <$> identifier
 
 subscript :: Expression -> Parser Expression
-subscript expr = withPosition $ Subscript expr <$> brackets expression
+subscript expr = withPosition $ Subscript expr <$> (brackets . many . withPosition) (brExpr <|> brOp)
+  where
+    brExpr = BracketExpr <$> expression
+    brOp = BracketExprOp <$> operator
 
 funcCall :: Parser Expression
 funcCall = withPosition $ try (FuncCall <$> identifier <*> argumentlist) <*> return UnknownT

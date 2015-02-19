@@ -31,14 +31,31 @@ generateExpression (Variable vName sr) =
 
 generateExpression (MemberAccess expression mName sr) = generateExpression expression >>= accessProperty mName sr
 
--- generateExpression (Subscript chunk index _) = do -- TODO: generate []-expressions properly
---   c@(_, Memorychunk _ hasCap innerT, mutable) <- generateExpression chunk
---   (chunkOp, _, _) <- toImmutable c
---   llvmtype <- toLLVMType True innerT
---   ptrOp <- instr (ExtractValue chunkOp [boolean 2 1 hasCap] [], llvmtype)
---   (indexOp, _, _) <- generateExpression index >>= toImmutable
---   elementOp <- instr (I.GetElementPtr False ptrOp [indexOp] [], llvmtype)
---   boolean return toImmutable mutable (elementOp, innerT, True)
+generateExpression (Subscript expr pat sr) = do
+  fop@(op, t, mutable) <- generateExpression expr
+  case t of
+    PointerT innerT -> do
+      innerLlvmtype <- toLLVMType True innerT
+      (cop, _, _) <- toImmutable fop
+      let [BracketExpr brExpr _] = pat
+      (indexOp, _, _) <- generateExpression brExpr
+      retOp <- instr (I.GetElementPtr False cop [indexOp] [], innerLlvmtype)
+      boolean return toImmutable mutable (retOp, t, True)
+    NewTypeT _ (Replacements _ pats) actualT -> case foldl mplus Nothing . map (patternMatch pat) $ pats of
+      Nothing -> throwError . ErrorString $ "Compiler error: no matching pattern at " ++ show sr
+      Just runPattern -> generateSubstitution (op, actualT, mutable) runPattern
+      where
+        patternMatch :: [BracketExpr] -> ([BracketToken], (Maybe Expression, Expression)) -> Maybe (FuncGen (Maybe Expression, Expression))
+        patternMatch supplied (pattern, subst) = (>> return subst) <$> recurse supplied pattern
+        recurse [] [] = Just $ return ()
+        recurse (BracketExpr brExpr _ : supplied) (BracketIdentifier ident _ : pattern) =
+          (generateExpression brExpr >>= (locals . at ident ?=) >>) <$> recurse supplied pattern
+        recurse supplied (BracketIdentifier ident (Just brExpr) : pattern) =
+          (generateExpression brExpr >>= (locals . at ident ?=) >>) <$> recurse supplied pattern
+        recurse (BracketExprOp supOp _ : supplied) (BracketOperator patOp : pattern)
+          | supOp == patOp = recurse supplied pattern
+          | otherwise = Nothing
+        recurse _ _ = Nothing
 
 generateExpression (ExprLit lit _) = case lit of
   ILit val t _ -> do
@@ -232,17 +249,22 @@ accessProperty mName sr = derefPointer >=> bottomGeneration
         return (op, realT, mutable)
     bottomGeneration (bottomOp, NewTypeT n (Replacements fields _) it, mutable) = case M.lookup mName fields of
       Nothing -> throwError . ErrorString $ "Compiler error: Unknown member field " ++ mName ++ " in type " ++ n ++ " at " ++ show sr
-      Just (_, expr) -> do -- TODO: generate runtimechecks
-        prevUsingLocals <- usingLocals <<%= M.union (M.fromList names)
-        prevLocals <- locals <<%= M.insert "self" (bottomOp, it, mutable)
-        res <- generateExpression expr
-        usingLocals .= prevUsingLocals
-        locals .= prevLocals
-        return res
-      where
-        names = case it of
-          StructT ps -> (_2 .~ (bottomOp, it, mutable)) <$> ps
-          _ -> []
+      Just subst -> generateSubstitution (bottomOp, it, mutable) $ return subst
+
+generateSubstitution :: FuncGenOperand -> FuncGen (Maybe Expression, Expression) -> FuncGen FuncGenOperand
+generateSubstitution fop@(_, t, _) gen = do
+  prevUsingLocals <- usingLocals <<%= M.union (M.fromList names)
+  prevLocals <- locals <<%= M.insert "self" fop
+  (_, expr) <- gen -- TODO: generate runtime check for condition
+  res <- generateExpression expr
+  usingLocals .= prevUsingLocals
+  locals .= prevLocals
+  return res
+  where
+    names = case t of
+      StructT ps -> (_2 .~ fop) <$> ps
+      _ -> []
+
 
 toImmutable :: FuncGenOperand -> FuncGen FuncGenOperand
 toImmutable res@(_, _, False) = return res
