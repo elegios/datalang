@@ -1,5 +1,7 @@
 {-# LANGUAGE FlexibleInstances, MultiParamTypeClasses #-}
 
+-- TODO: split into Parser.Ast and Inference.Ast
+
 module Ast where
 
 import qualified Data.Map as M
