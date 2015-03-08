@@ -4,6 +4,7 @@ module Inference (fullInfer, infer) where
 
 import Ast hiding (Type(..), Restriction, FuncDef, Expression, Statement, TypeDef(..))
 import Data.Functor ((<$>))
+import Data.Function (on)
 import Data.STRef
 import Data.Tuple (swap)
 import Data.Char (isLower, isUpper)
@@ -231,9 +232,7 @@ enterExpression (Subscript expr brExprs sr) = do
 
 enterExpression (Variable vName sr) =
   use (variables . at vName) >>= (fmap (Variable vName sr, ) . maybe notFound return)
-  where notFound = do
-          addError . ErrorString $ vName ++ " is not in scope at " ++ show sr
-          newUnbound NoRestriction
+  where notFound = errorReturn . ErrorString $ vName ++ " is not in scope at " ++ show sr
 
 enterExpression (FuncCall fName inExprs t sr) = do
   (inExprs', inTs) <- unzip <$> mapM enterExpression inExprs
@@ -450,20 +449,16 @@ applyRestriction errF t@(Ref r) restr = readRef r >>= \tvar -> case tvar of
     _ -> addError . errF $ "Could not apply restriction " ++ show restr ++ " on type " ++ show t ++ " (" ++ show u ++ ")"
   u@(Unbound (PropertiesR origPs origBrackets) changeable) -> case restr of
     PropertiesR restrPs restrBrackets -> do
-      newPs <- recurse origPs restrPs
+      newPs <- mapM check $ mergeTraversalBy (compare `on` fst) origPs restrPs
       when (changeable == Changeable) . writeRef r $ Unbound (PropertiesR newPs $ restrBrackets ++ origBrackets) changeable
     _ -> addError . errF $ "Could not apply restriction " ++ show restr ++ " on type " ++ show t ++ " (" ++ show u ++ ")"
     where
-      recurse allOrigs@(op@(opName, opR) : origTail) allRestrs@(rp@(rpName, rpR) : restrTail) -- NOTE: essentially a merge sort
-        | opName == rpName = (:) <$> ((opName,) <$> unify errF opR rpR) <*> recurse origTail restrTail
-        | opName < rpName = (op :) <$> recurse origTail allRestrs
-        | opName > rpName = do
-            unless (changeable == Changeable) . addError . errF $ "Cannot change unchangeable type value, we require " ++ show u ++ " to have a property " ++ rpName ++ " but it does not"
-            (rp :) <$> recurse allOrigs restrTail
-      recurse origs [] = return origs
-      recurse [] restrs = do
-        unless (changeable == Changeable) . addError . errF $ "Cannot change unchangeable type value, we require " ++ show u ++ " to have properties " ++ show restrs ++ " but it does not"
-        return restrs
+      check item = case item of
+        LeftL i -> return i
+        BothE (opName, op) (_, rp) -> (opName,) <$> unify errF op rp
+        RightL i@(rpName, _) -> do
+          unless (changeable == Changeable) . addError . errF $ "Cannot change unchangeable type value, we require " ++ show u ++ " to have a property " ++ rpName ++ " but it does not"
+          return i
   u -> addError . errF $ "Could not apply restriction " ++ show restr ++ " on type " ++ show t ++ " (" ++ show u ++ ")"
 
 applyRestriction _ (UIntT _) UIntR = return ()
@@ -485,16 +480,12 @@ applyRestriction errF (PointerT t) (PropertiesR ps brackets) = do
     exprOnly ([Right _], it) = Just $ applyRestriction errF it (NumR IntSpec)
     exprOnly _ = Nothing
 
-applyRestriction errF t@(StructT origPs) (PropertiesR restrPs []) = recurse origPs restrPs
+applyRestriction errF t@(StructT origPs) (PropertiesR restrPs []) = mapM_ check $ mergeTraversalBy (compare `on` fst) origPs restrPs
   where
-    recurse allOrigs@((opName, opR) : origTail) allRestrs@((rpName, rpR) : restrTail)
-      | opName == rpName = unify errF opR rpR >> recurse origTail restrTail -- TODO: this is basically the exact same thing as accessProperty, should probably be defined at the same place
-      | opName < rpName = recurse origTail allRestrs
-      | opName > rpName = do
-          addError . errF $ "Unsatisfied property requirement: " ++ show t ++ " lacks property " ++ rpName
-          recurse allOrigs restrTail
-    recurse _ [] = return ()
-    recurse [] restrs = addError . errF $ "Unsatisfied property requirement: " ++ show t ++ " lacks properties " ++ show restrs
+    check item = case item of
+      LeftL _ -> return ()
+      BothE (_, op) (_, rp) -> void $ unify errF op rp
+      RightL (rpName, _) -> addError . errF $ "Unsatisfied property requirement: " ++ show t ++ " lacks property " ++ rpName
 
 applyRestriction errF t restr = addError . errF $ "Could not apply restriction " ++ show restr ++ " on type " ++ show t
 
@@ -504,9 +495,7 @@ accessProperty errF member inferred = case inferred of
   PointerT inf -> accessProperty errF member inf
   StructT ps -> case lookup member ps of
     Just prop -> return prop
-    Nothing -> do
-      addError . errF $ "Struct lacks a property with the name " ++ member
-      newUnbound NoRestriction
+    Nothing -> errorReturn . errF $ "Struct lacks a property with the name " ++ member
   Ref r -> readRef r >>= \tvar -> case tvar of
     Link inf -> accessProperty errF member inf
     Unbound NoRestriction Changeable -> do
@@ -519,13 +508,9 @@ accessProperty errF member inferred = case inferred of
         innerInferred <- newUnbound NoRestriction
         applyRestriction errF inferred $ PropertiesR [(member, innerInferred)] []
         return innerInferred
-    u -> do
-      addError . errF $ show u ++ " cannot have a property " ++ member
-      newUnbound NoRestriction
+    u -> errorReturn . errF $ show u ++ " cannot have a property " ++ member
   NewType n _ t (Replacements repPs _) -> case M.lookup member repPs of
-    Nothing -> do
-      addError . errF $ "Type " ++ n ++ " does not have a property " ++ member
-      newUnbound NoRestriction
+    Nothing -> errorReturn . errF $ "Type " ++ n ++ " does not have a property " ++ member
     Just (_, expr) -> do
       prevVariables <- variables <<%= M.union (M.fromList names)
       variables . at "self" ?= t
@@ -536,9 +521,7 @@ accessProperty errF member inferred = case inferred of
       names = case t of
         StructT ps -> ps
         _ -> []
-  t -> do
-    addError . errF $ "Type " ++ show t ++ " cannot have a property"
-    newUnbound NoRestriction
+  t -> errorReturn . errF $ "Type " ++ show t ++ " cannot have a property"
 
 accessBracket :: UnifyErrorFunction -> Inferred s -> [(BracketExprT (Inferred s), Inferred s)] -> Inferrer s ([BracketExprT (Inferred s)], Inferred s)
 accessBracket errF t pat = case t of
@@ -598,12 +581,8 @@ makePointer errF inferred = case inferred of
       applyRestriction errF (PointerT innerInferred) restr
       writeRef r . Link $ PointerT innerInferred
       return innerInferred
-    u -> do
-      addError . errF $ show u ++ " cannot be a pointer"
-      newUnbound NoRestriction -- TODO: this is a common pattern, extract it
-  t -> do
-    addError . errF $ "Type " ++ show t ++ " does not unify with a pointer"
-    newUnbound NoRestriction
+    u -> errorReturn . errF $ show u ++ " cannot be a pointer"
+  t -> errorReturn . errF $ "Type " ++ show t ++ " does not unify with a pointer"
 
 makeBool :: UnifyErrorFunction -> Inferred s -> Inferrer s ()
 makeBool errF inferred = case inferred of
@@ -618,9 +597,7 @@ convert :: Ast.Type -> Inferrer s (Inferred s)
 convert t = case t of
   Ast.NamedT n@(c:_) [] | isLower c -> use (typeVariables . at n) >>= \mT -> case mT of
     Just tref -> return tref
-    Nothing -> do
-      addError . ErrorString $ "Unknown typevariable '" ++ n ++ "'" -- FIXME: This error will also occur in functions calling incorrectly specified functions, not very helpful
-      newUnbound NoRestriction
+    Nothing -> errorReturn . ErrorString $ "Unknown typevariable '" ++ n ++ "'" -- FIXME: This error will also occur in functions calling incorrectly specified functions, not very helpful
   _ -> case t of
     Ast.NamedT n@(c:_) its | isUpper c -> use (typeDefs . at n) >>= \mDef -> case mDef of
       Just (Ast.Alias params origT _) | length params == length its ->
@@ -629,9 +606,7 @@ convert t = case t of
         constructNamedT NewType params origT <*> return reps
       Just (Ast.Alias params _ _) -> errF params
       Just (Ast.NewType params _ _ _) -> errF params
-      Nothing -> do
-        addError . ErrorString $ "Unknown named type '" ++ n ++ "'"
-        newUnbound NoRestriction
+      Nothing -> errorReturn . ErrorString $ "Unknown named type '" ++ n ++ "'"
       where
         constructNamedT f params origT = do
           its' <- mapM convert its
@@ -639,9 +614,7 @@ convert t = case t of
           origT' <- convert origT
           typeVariables .= prevTypeVars
           return $ f n its' origT'
-        errF params = do
-          addError . ErrorString $ "Incorrect instantiation of type '" ++ n ++ "', wrong number of parameters (" ++ show (length its) ++ " != " ++ show (length params) ++ ")"
-          newUnbound NoRestriction
+        errF params = errorReturn . ErrorString $ "Incorrect instantiation of type '" ++ n ++ "', wrong number of parameters (" ++ show (length its) ++ " != " ++ show (length params) ++ ")"
     Ast.PointerT it -> PointerT <$> convert it
     Ast.StructT props -> StructT <$> mapM propConvert props
     Ast.UnknownT -> newUnbound NoRestriction
@@ -710,3 +683,15 @@ readRef = lift . readSTRef
 
 addError :: ErrorMessage -> Inferrer s ()
 addError err = errors %= (err :)
+
+errorReturn :: ErrorMessage -> Inferrer s (Inferred s)
+errorReturn = (>> newUnbound NoRestriction) . addError
+
+data MergeTraversal a = LeftL a | BothE a a | RightL a
+mergeTraversalBy :: (a -> a -> Ordering) -> [a] -> [a] -> [MergeTraversal a]
+mergeTraversalBy _ [] rs = map RightL rs
+mergeTraversalBy _ ls [] = map LeftL ls
+mergeTraversalBy f origL@(l:ls) origR@(r:rs) = case f l r of
+  LT -> LeftL l : mergeTraversalBy f ls origR
+  EQ -> BothE l r : mergeTraversalBy f ls rs
+  GT -> RightL r : mergeTraversalBy f origL rs
