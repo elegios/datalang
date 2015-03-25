@@ -1,17 +1,29 @@
 {-# LANGUAGE FlexibleContexts, TupleSections #-}
 
-module Parser (parseFile) where
+module Parser
+( parseFile
+, SourceFile(..)
+, TypeDef(..)
+, Source
+, BracketToken(..)
+, CallableDef(..)
+, Type(..)
+, Restriction(..)
+, NumSpec(..)
+, Statement(..)
+, Expression(..)
+, Literal(..)
+) where
 
-import Ast
+import Ast (SourceLoc(..), SourceRange(..), TSize(..), BinOp(..), UnOp(..), TerminatorType(..))
 import Data.Functor ((<$>), (<$))
+import Data.Char (isLower)
 import Control.Applicative ((<*>), (<*))
 import Control.Monad.Identity
 import Text.Parsec hiding (runParser)
 import Text.Parsec.Expr
 import qualified Data.Text.Lazy as L
 import qualified Data.Text.Lazy.IO as LIO
-import qualified Data.Map as M
-import qualified Data.Set as S
 import qualified Text.Parsec.Token as T
 
 type StreamType = L.Text
@@ -19,9 +31,6 @@ type StateType = ()
 type UnderlyingMonad = Identity
 
 type Parser = ParsecT StreamType StateType UnderlyingMonad
-
-runParser :: Parser a -> StateType -> FilePath -> StreamType -> Either ParseError a
-runParser p st path stream = runIdentity $ runParserT p st path stream
 
 langDef :: Stream stream monad Char => T.GenLanguageDef stream state monad
 langDef = T.LanguageDef
@@ -34,7 +43,7 @@ langDef = T.LanguageDef
   , T.identLetter = alphaNum <|> char '_'
   , T.opStart = T.opLetter langDef
   , T.opLetter = oneOf "+-*/%<>=!^&|:,"
-  , T.reservedNames = ["defer", "if", "else", "while", "return", "break", "continue", "null", "let", "mut", "func", "proc", "self"]
+  , T.reservedNames = ["defer", "if", "else", "while", "return", "break", "continue", "null", "let", "mut", "func", "proc", "self", "ref"]
   , T.reservedOpNames =
     [ "-", "^", "&", "!", "*"
     , "/", "%", "+", "-", "<<"
@@ -44,42 +53,28 @@ langDef = T.LanguageDef
     ]
   }
 
-parseFile :: FilePath -> IO (Either ParseError Source)
+runParser :: Parser a -> StateType -> FilePath -> StreamType -> Either ParseError a
+runParser p st path stream = runIdentity $ runParserT p st path stream
+
+parseFile :: FilePath -> IO (Either ParseError SourceFile)
 parseFile path = runParser sourceParser () path <$> LIO.readFile path
 
-sourceParser :: Parser Source
-sourceParser = toSource <$> topParser
+sourceParser :: Parser SourceFile
+sourceParser = whiteSpace >> SourceFile <$> many typeDef <*> many callableDef <* eof
 
-toSource :: [Top] -> Source
-toSource tops = Source callableDefs typeDefs
-  where
-    callableDefs = M.fromList [ (n, d) | CallableDefinition n d <- tops ]
-    typeDefs = M.fromList [ (n, d) | TypeDefinition n d <- tops ]
-
-data Top = CallableDefinition String CallableDef | TypeDefinition String TypeDef
-
--- TODO: ensure 'try' is used in the right places
-topParser :: Parser [Top]
-topParser = whiteSpace >> many (callableDef <|> typeDef) <* eof
-
-callableDef :: Parser Top
+callableDef :: Parser CallableDef
 callableDef = withPosition $
-  (reserved "proc" >> makedef <$> identifier <*> procdef) <|>
-  (reserved "func" >> makedef <$> identifier <*> funcdef)
+  (reserved "proc" >> makedef ProcDef commaSep commaSep) <|>
+  (reserved "func" >> makedef FuncDef id id)
   where
-    makedef n d sr = CallableDefinition n $ d sr
-    procdef = do
-      restrs <- option [] . braces $ many restriction
-      (inTs, outTs) <- procsig typeLiteral
-      (ins, outs) <- procsig identifier
-      ProcDef inTs outTs restrs ins outs <$> scope
-    funcdef = do
-      restrs <- option [] . braces $ many restriction
-      (inTs, outT) <- funcsig typeLiteral
-      (ins, out) <- funcsig identifier
-      FuncDef inTs outT restrs ins out <$> scope
-    procsig p = (,) <$> commaSep p <* reservedOp "->" <*> commaSep p
-    funcsig p = (,) <$> commaSep p <* reservedOp "->" <*> p
+    makedef c m1 m2 = c
+                  <$> restrs
+                  <*> commaSep typeLiteral <* reservedOp "->"
+                  <*> m1 typeLiteral
+                  <*> commaSep identifier <* reservedOp "->"
+                  <*> m2 identifier
+                  <*> scope
+    restrs = option [] . braces $ many restriction
 
 restriction :: Parser (String, Restriction)
 restriction = (,) <$> identifier <*> (numR <|> uintR <|> propertiesR)
@@ -88,7 +83,7 @@ restriction = (,) <$> identifier <*> (numR <|> uintR <|> propertiesR)
        <|> replace reserved "int" (NumR IntSpec)
        <|> replace reserved "float" (NumR FloatSpec)
     uintR = replace reserved "uint" UIntR
-    propertiesR = (\(StructT ps) -> PropertiesR ps) <$> structTypeLiteral <*> return []
+    propertiesR = (\(StructT ps _) -> PropertiesR ps) <$> structTypeLiteral <*> return []
 
 statement :: Parser Statement
 statement = procCall
@@ -135,8 +130,8 @@ varInit :: Parser Statement
 varInit = withPosition (VarInit <$> (reserved "let" >> mutable) <*> identifier <*> typeAnno <*> value) <?> "var init"
   where
     mutable = option False $ replace reserved "mut" True
-    typeAnno = option UnknownT $ reservedOp ":" >> typeLiteral
-    value = option (Zero UnknownT) $ reservedOp "=" >> expression
+    typeAnno = optionMaybe $ reservedOp ":" >> typeLiteral
+    value = optionMaybe $ reservedOp "=" >> expression
 
 expression :: Parser Expression
 expression = buildExpressionParser expressionTable simpleExpression <?> "expression"
@@ -144,24 +139,24 @@ expression = buildExpressionParser expressionTable simpleExpression <?> "express
 -- TODO: implement all operators, or implement them as something else
 expressionTable :: [[Operator StreamType StateType UnderlyingMonad Expression]]
 expressionTable =
-  [ [prefix "-" AriNegate, prefix "^" AddressOf, prefix "&" Deref, prefix "!" Not]
-  , [binary "*" Times, binary "/" Divide, binary "%" Remainder]
-  , [binary "+" Plus, binary "-" Minus]
-  , [binary "<<" LShift, binary ">>" LogRShift, binary ">>>" AriRShift]
-  , [binary "&" BinAnd]
-  , [binary "|" BinOr]
+  [ [pre "-" AriNegate, pre "$" Deref, pre "!" Not]
+  , [bin "*" Times, bin "/" Divide, bin "%" Remainder]
+  , [bin "+" Plus, bin "-" Minus]
+  , [bin "<<" LShift, bin ">>" LogRShift, bin ">>>" AriRShift]
+  , [bin "&" BinAnd]
+  , [bin "|" BinOr]
   , [typeAssertion]
-  , [binary "<" Lesser, binary ">" Greater, binary "<=" LE, binary ">=" GE, binary "==" Equal, binary "!=" NotEqual]
-  , [binary "&&" ShortAnd]
-  , [binary "||" ShortOr]
+  , [bin "<" Lesser, bin ">" Greater, bin "<=" LE, bin ">=" GE, bin "==" Equal, bin "!=" NotEqual]
+  , [bin "&&" ShortAnd]
+  , [bin "||" ShortOr]
   ]
 
 -- TODO: pretty ugly range here, it only covers the operator, not both expressions and the operator
-binary :: String -> BinOp -> Operator StreamType StateType UnderlyingMonad Expression
-binary  name op = Infix (withPosition $ (\s e1 e2 -> Bin op e1 e2 s) <$ reservedOp name) AssocLeft
+bin :: String -> BinOp -> Operator StreamType StateType UnderlyingMonad Expression
+bin  name op = Infix (withPosition $ (\s e1 e2 -> Bin op e1 e2 s) <$ reservedOp name) AssocLeft
 
-prefix :: String -> UnOp -> Operator StreamType StateType UnderlyingMonad Expression
-prefix name op = Prefix (withPosition $ flip (Un op) <$ reservedOp name)
+pre :: String -> UnOp -> Operator StreamType StateType UnderlyingMonad Expression
+pre name op = Prefix (withPosition $ flip (Un op) <$ reservedOp name)
 
 typeAssertion :: Operator StreamType StateType UnderlyingMonad Expression
 typeAssertion = Postfix $ withPosition assertion
@@ -169,8 +164,9 @@ typeAssertion = Postfix $ withPosition assertion
     assertion = (\lit p e -> TypeAssertion e lit p) <$> (reservedOp ":" >> typeLiteral)
 
 simpleExpression :: Parser Expression
-simpleExpression = (parens expression <|> funcCall <|> exprLit <|> variable) >>= contOrNo <?> "simple expression"
+simpleExpression = (ref <|> parens expression <|> funcCall <|> exprLit <|> variable) >>= contOrNo <?> "simple expression"
   where
+    ref = withPosition $ reserved "ref" >> Un AddressOf <$> parens expression
     contOrNo prev = cont prev <|> return prev
     cont prev = choice $ map ($ prev) [memberAccess, subscript]
 
@@ -181,65 +177,39 @@ memberAccess :: Expression -> Parser Expression
 memberAccess expr = withPosition $ dot >> MemberAccess expr <$> identifier
 
 subscript :: Expression -> Parser Expression
-subscript expr = withPosition $ Subscript expr <$> (brackets . many . withPosition) (brExpr <|> brOp)
+subscript expr = withPosition $ Subscript expr <$> (brackets . many) (brExpr <|> brOp)
   where
-    brExpr = BracketExpr <$> expression
-    brOp = BracketExprOp <$> operator
+    brExpr = Right <$> expression
+    brOp = Left <$> operator
 
 funcCall :: Parser Expression
-funcCall = withPosition $ try (FuncCall <$> identifier <*> argumentlist) <*> return UnknownT
-  where argumentlist = parens $ commaSep expression
+funcCall = withPosition $ try (FuncCall <$> identifier <* openParen) <*> commaSep expression <* closeParen
 
 exprLit :: Parser Expression
-exprLit = withPosition $ ExprLit <$> withPosition variants
+exprLit = ExprLit <$> withPosition variants
   where variants = replace reserved "true" (BLit True)
                <|> replace reserved "false" (BLit False)
-               <|> replace reserved "null" (Null UnknownT)
-               <|> replace reserved "_" (Undef UnknownT)
+               <|> replace reserved "null" Null
+               <|> replace reserved "_" Undef
                <|> numLit
 
 numLit :: Parser (SourceRange -> Literal)
-numLit = either ILit FLit <$> naturalOrFloat <*> return UnknownT
+numLit = either ILit FLit <$> naturalOrFloat
 
-typeDef :: Parser Top
-typeDef = uncurry TypeDefinition <$> (attachPosition newTypeDef <|> attachPosition aliasDef)
+typeDef :: Parser TypeDef
+typeDef = withPosition $ newType <|> alias
   where
-    newTypeDef = do
-      reserved "type"
-      ident <- identifier
-      tParams <- typeParams
-      makeReplacements <- braces $ do
-        hidden <- S.fromList <$> option [] (reserved "hide" >> commaSep identifier)
-        replacements <- foldParse replacement $ Replacements M.empty []
-        return $ let
-          removeHidden = filter (`S.notMember` hidden)
-          toReplacement n = (n, (Nothing, Variable n $ SourceRange (SourceLoc "t" 0 0) (SourceLoc "t" 0 0)))
-          merge ns = Replacements (identifiers replacements `M.union` ns) (patterns replacements)
-          in merge . M.fromList . map toReplacement . removeHidden
-      t <- typeLiteral
-      let canonIdentifiers = case t of
-            StructT ps -> map fst ps
-            _ -> [] -- TODO: pull names from NamedT as well
-      return (ident, NewType tParams (makeReplacements canonIdentifiers) t)
-    replacement (Replacements ids pats) = (flip Replacements pats <$> idPattern) <|> (Replacements ids . (: pats) <$> bracketPattern)
-      where
-        idPattern = M.insert <$> identifier <*> rightHand <*> return ids
-        bracketPattern = (,) <$> (brackets . many $ bracketId <|> bracketOp) <*> rightHand
-        bracketId = BracketIdentifier <$> identifier <*> optionMaybe (reservedOp "=" >> expression)
-        bracketOp = BracketOperator <$> operator
-        rightHand = (,) <$> optionMaybe (reservedOp "|" >> expression) <*> (reservedOp "->" >> expression)
-    aliasDef = do
-      reserved "alias"
-      ident <- identifier
-      fmap (ident, ) $ Alias <$> typeParams <*> typeLiteral
-    typeParams = option [] . angles $ commaSep1 identifier
-    attachPosition p = do
-      start <- getPosition
-      (i, ret) <- p
-      (i, ) . ret <$> toSourceRange start <$> getPosition
-
-foldParse :: (a -> Parser a) -> a -> Parser a
-foldParse f prev = (f prev >>= foldParse f) <|> return prev
+    tParams = option [] . angles $ commaSep1 identifier
+    alias = Alias <$> tParams <*> typeLiteral
+    newType = NewType <$> tParams
+              <*> option [] (reserved "hide" >> commaSep1 identifier)
+              <*> many ((,) <$> identifier <*> replacement)
+              <*> many ((,) <$> brPattern <*> replacement)
+              <*> typeLiteral
+    brPattern = brackets . many $
+      (BrId <$> identifier <*> optionMaybe (reservedOp "=" >> expression))
+      <|> (BrOp <$> operator)
+    replacement = (,) <$> optionMaybe (reservedOp "|" >> expression) <*> expression
 
 typeLiteral :: Parser Type
 typeLiteral = simpleTypeLiteral
@@ -248,7 +218,7 @@ typeLiteral = simpleTypeLiteral
           <|> structTypeLiteral
 
 simpleTypeLiteral :: Parser Type
-simpleTypeLiteral = uintTypeLiteral <|> remainingParser
+simpleTypeLiteral = uintTypeLiteral <|> withPosition remainingParser
   where
     remainingParser = choice $ map (uncurry $ replace reserved) typePairs
     typePairs = [ ("I8", IntT S8)
@@ -261,7 +231,7 @@ simpleTypeLiteral = uintTypeLiteral <|> remainingParser
                 ]
 
 uintTypeLiteral :: Parser Type
-uintTypeLiteral = choice . map (uncurry $ replace reserved) $ typePairs
+uintTypeLiteral = withPosition . choice . map (uncurry $ replace reserved) $ typePairs
   where
     typePairs = [ ("U8", UIntT S8)
                 , ("U16", UIntT S16)
@@ -270,14 +240,18 @@ uintTypeLiteral = choice . map (uncurry $ replace reserved) $ typePairs
                 ]
 
 namedTypeLiteral :: Parser Type
-namedTypeLiteral = NamedT <$> identifier <*> typeParams
-  where typeParams = option [] . angles $ commaSep1 typeLiteral
+namedTypeLiteral = withPosition $ typeVar <|> (NamedT <$> identifier <*> tParams)
+  where
+    tParams = option [] . angles $ commaSep1 typeLiteral
+    typeVar = do
+      n@(c:_) <- identifier
+      if isLower c then return $ TypeVar n else fail ""
 
 pointerTypeLiteral :: Parser Type
-pointerTypeLiteral = reservedOp "^" >> PointerT <$> typeLiteral
+pointerTypeLiteral = withPosition $ reservedOp "$" >> PointerT <$> typeLiteral
 
 structTypeLiteral :: Parser Type
-structTypeLiteral = braces $ StructT <$> property `sepEndBy` comma
+structTypeLiteral = withPosition . braces $ StructT <$> property `sepEndBy` comma
   where property = (,) <$> identifier <*> (reservedOp ":" >> typeLiteral)
 
 withPosition :: Parser (SourceRange -> a) -> Parser a
@@ -292,6 +266,11 @@ toSourceRange from to = SourceRange (toLoc from) (toLoc to)
 
 lexer :: Stream stream monad Char => T.GenTokenParser stream state monad
 lexer = T.makeTokenParser langDef
+
+openParen :: Parser ()
+openParen = void . T.lexeme lexer $ char '('
+closeParen :: Parser ()
+closeParen = void . T.lexeme lexer $ char ')'
 
 identifier :: Parser String
 identifier = T.identifier lexer
@@ -337,3 +316,120 @@ dot = void $ char '.'
 
 replace :: Functor f => (a -> f c) -> a -> b -> f b
 replace f a b = b <$ f a
+
+data SourceFile = SourceFile
+  { typeDefinitions :: [TypeDef]
+  , callableDefinitions :: [CallableDef]
+  }
+
+data TypeDef = NewType
+               { typeParams :: [String]
+               , hiddenIdentifiers :: [String]
+               , introducedIdentifiers :: [(String, (Maybe Expression, Expression))]
+               , bracketPatterns :: [([BracketToken], (Maybe Expression, Expression))]
+               , wrappedType :: Type
+               , typeRange :: SourceRange
+               }
+             | Alias
+               { typeParams :: [String]
+               , wrappedType :: Type
+               , typeRange :: SourceRange
+               }
+data BracketToken = BrId String (Maybe Expression)
+                  | BrOp String
+
+data CallableDef = FuncDef
+                   { restrictions :: [(String, Restriction)]
+                   , intypes :: [Type]
+                   , outtype :: Type
+                   , inargs :: [String]
+                   , outArg :: String
+                   , callableBody :: Statement
+                   , callableRange :: SourceRange
+                   }
+                 | ProcDef
+                   { restrictions :: [(String, Restriction)]
+                   , intypes :: [Type]
+                   , outtypes :: [Type]
+                   , inargs :: [String]
+                   , outargs :: [String]
+                   , callableBody :: Statement
+                   , callableRange :: SourceRange
+                   }
+
+data Type = IntT TSize SourceRange
+          | UIntT TSize SourceRange
+          | FloatT TSize SourceRange
+          | BoolT SourceRange
+          | NamedT String [Type] SourceRange
+          | TypeVar String SourceRange
+          | PointerT Type SourceRange
+          | StructT [(String, Type)] SourceRange
+
+data Restriction = PropertiesR [(String, Type)] [([Either String Type], Type)]
+                 | UIntR
+                 | NumR NumSpec
+data NumSpec = NoSpec | IntSpec | FloatSpec
+
+data Statement = ProcCall String [Expression] [Expression] SourceRange
+               | Defer Statement SourceRange
+               | ShallowCopy Expression Expression SourceRange
+               | If Expression Statement (Maybe Statement) SourceRange
+               | While Expression Statement SourceRange
+               | Scope [Statement] SourceRange
+               | Terminator TerminatorType SourceRange
+               | VarInit Bool String (Maybe Type) (Maybe Expression) SourceRange
+
+data Expression = Bin BinOp Expression Expression SourceRange
+                | Un UnOp Expression SourceRange
+                | MemberAccess Expression String SourceRange
+                | Subscript Expression [Either String Expression] SourceRange
+                | Variable String SourceRange
+                | FuncCall String [Expression] SourceRange
+                | ExprLit Literal
+                | TypeAssertion Expression Type SourceRange
+
+data Literal = ILit Integer SourceRange
+             | FLit Double SourceRange
+             | BLit Bool SourceRange
+             | Null SourceRange
+             | Undef SourceRange
+
+class Source a where
+  location :: a -> SourceRange
+instance Source TypeDef where
+  location = typeRange
+instance Source CallableDef where
+  location = callableRange
+instance Source Type where
+  location (IntT _ r) = r
+  location (UIntT _ r) = r
+  location (FloatT _ r) = r
+  location (BoolT r) = r
+  location (NamedT _ _ r) = r
+  location (PointerT _ r) = r
+  location (StructT _ r) = r
+instance Source Statement where
+  location (ProcCall _ _ _ r) = r
+  location (Defer _ r) = r
+  location (ShallowCopy _ _ r) = r
+  location (If _ _ _ r) = r
+  location (While _ _ r) = r
+  location (Scope _ r) = r
+  location (Terminator _ r) = r
+  location (VarInit _ _ _ _ r) = r
+instance Source Expression where
+  location (Bin _ _ _ r) = r
+  location (Un _ _ r) = r
+  location (MemberAccess _ _ r) = r
+  location (Subscript _ _ r) = r
+  location (Variable _ r) = r
+  location (FuncCall _ _ r) = r
+  location (ExprLit l) = location l
+  location (TypeAssertion _ _ r) = r
+instance Source Literal where
+  location (ILit _ r) = r
+  location (FLit _ r) = r
+  location (BLit _ r) = r
+  location (Null r) = r
+  location (Undef r) = r

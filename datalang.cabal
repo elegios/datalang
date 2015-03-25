@@ -64,4 +64,3 @@ executable datalang
 
   -- Base language which the package is written in.
   default-language:    Haskell2010
-
