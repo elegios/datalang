@@ -96,8 +96,10 @@ statement = procCall
         <|> varInit
 
 procCall :: Parser Statement
-procCall = withPosition (try (ProcCall <$> identifier <*> argumentlist) <*> argumentlist) <?> "procedurecall"
-  where argumentlist = parens $ commaSep expression
+procCall = withPosition $ try (ProcCall <$> expression <* char '#') <*> is <*> os
+  where
+    is = whiteSpace >> commaSep expression
+    os = option [] $ reservedOp "#" >> commaSep expression
 
 defer :: Parser Statement
 defer = reserved "defer" >> withPosition (Defer <$> statement) <?> "defer"
@@ -137,9 +139,11 @@ expression :: Parser Expression
 expression = buildExpressionParser expressionTable simpleExpression <?> "expression"
 
 -- TODO: implement all operators, or implement them as something else
-expressionTable :: [[Operator StreamType StateType UnderlyingMonad Expression]]
+type ExpOp = Operator StreamType StateType UnderlyingMonad Expression
+expressionTable :: [[ExpOp]]
 expressionTable =
-  [ [pre "-" AriNegate, pre "$" Deref, pre "!" Not]
+  [ [funcCall, memberAccess, subscript]
+  , [pre "-" AriNegate, pre "$" Deref, pre "!" Not]
   , [bin "*" Times, bin "/" Divide, bin "%" Remainder]
   , [bin "+" Plus, bin "-" Minus]
   , [bin "<<" LShift, bin ">>" LogRShift, bin ">>>" AriRShift]
@@ -152,38 +156,37 @@ expressionTable =
   ]
 
 -- TODO: pretty ugly range here, it only covers the operator, not both expressions and the operator
-bin :: String -> BinOp -> Operator StreamType StateType UnderlyingMonad Expression
+bin :: String -> BinOp -> ExpOp
 bin  name op = Infix (withPosition $ (\s e1 e2 -> Bin op e1 e2 s) <$ reservedOp name) AssocLeft
 
-pre :: String -> UnOp -> Operator StreamType StateType UnderlyingMonad Expression
+pre :: String -> UnOp -> ExpOp
 pre name op = Prefix (withPosition $ flip (Un op) <$ reservedOp name)
 
-typeAssertion :: Operator StreamType StateType UnderlyingMonad Expression
-typeAssertion = Postfix $ withPosition assertion
-  where
-    assertion = (\lit p e -> TypeAssertion e lit p) <$> (reservedOp ":" >> typeLiteral)
+postHelp :: (Expression -> i -> SourceRange -> Expression) -> Parser i -> ExpOp
+postHelp c p = Postfix . withPosition $ (\i r e -> c e i r) <$> p
 
-simpleExpression :: Parser Expression
-simpleExpression = (ref <|> parens expression <|> funcCall <|> exprLit <|> variable) >>= contOrNo <?> "simple expression"
-  where
-    ref = withPosition $ reserved "ref" >> Un AddressOf <$> parens expression
-    contOrNo prev = cont prev <|> return prev
-    cont prev = choice $ map ($ prev) [memberAccess, subscript]
+funcCall :: ExpOp
+funcCall = postHelp FuncCall . parens $ commaSep expression
 
-variable :: Parser Expression
-variable = withPosition $ Variable <$> identifier
-
-memberAccess :: Expression -> Parser Expression
-memberAccess expr = withPosition $ dot >> MemberAccess expr <$> identifier
-
-subscript :: Expression -> Parser Expression
-subscript expr = withPosition $ Subscript expr <$> (brackets . many) (brExpr <|> brOp)
+subscript :: ExpOp
+subscript = postHelp Subscript . brackets . many $ brExpr <|> brOp
   where
     brExpr = Right <$> expression
     brOp = Left <$> operator
 
-funcCall :: Parser Expression
-funcCall = withPosition $ try (FuncCall <$> identifier <* openParen) <*> commaSep expression <* closeParen
+memberAccess :: ExpOp
+memberAccess = postHelp MemberAccess $ dot >> identifier
+
+typeAssertion :: ExpOp
+typeAssertion = postHelp TypeAssertion $ reservedOp ":" >> typeLiteral
+
+simpleExpression :: Parser Expression
+simpleExpression = (ref <|> parens expression <|> exprLit <|> variable) <?> "simple expression"
+  where
+    ref = withPosition $ reserved "ref" >> Un AddressOf <$> parens expression
+
+variable :: Parser Expression
+variable = withPosition $ Variable <$> identifier
 
 exprLit :: Parser Expression
 exprLit = ExprLit <$> withPosition variants
@@ -266,11 +269,6 @@ toSourceRange from to = SourceRange (toLoc from) (toLoc to)
 
 lexer :: Stream stream monad Char => T.GenTokenParser stream state monad
 lexer = T.makeTokenParser langDef
-
-openParen :: Parser ()
-openParen = void . T.lexeme lexer $ char '('
-closeParen :: Parser ()
-closeParen = void . T.lexeme lexer $ char ')'
 
 identifier :: Parser String
 identifier = T.identifier lexer
@@ -371,7 +369,7 @@ data Restriction = PropertiesR [(String, Type)] [([Either String Type], Type)]
                  | NumR NumSpec
 data NumSpec = NoSpec | IntSpec | FloatSpec
 
-data Statement = ProcCall String [Expression] [Expression] SourceRange
+data Statement = ProcCall Expression [Expression] [Expression] SourceRange
                | Defer Statement SourceRange
                | ShallowCopy Expression Expression SourceRange
                | If Expression Statement (Maybe Statement) SourceRange
@@ -385,7 +383,7 @@ data Expression = Bin BinOp Expression Expression SourceRange
                 | MemberAccess Expression String SourceRange
                 | Subscript Expression [Either String Expression] SourceRange
                 | Variable String SourceRange
-                | FuncCall String [Expression] SourceRange
+                | FuncCall Expression [Expression] SourceRange
                 | ExprLit Literal
                 | TypeAssertion Expression Type SourceRange
 
