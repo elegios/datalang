@@ -8,11 +8,11 @@ import qualified Data.Map as M
 import Data.Functor ((<$>))
 import Data.Generics.Uniplate.Direct
 
-data SourceLoc = SourceLoc File Line Column deriving Show
+data SourceLoc = SourceLoc File Line Column deriving (Show, Eq, Ord)
 type File = String
 type Line = Int
 type Column = Int
-data SourceRange = SourceRange SourceLoc SourceLoc
+data SourceRange = SourceRange SourceLoc SourceLoc deriving (Eq, Ord)
 
 nowhere :: SourceRange
 nowhere = SourceRange (SourceLoc "nowhere" 0 0) (SourceLoc "nowhere" 0 0)
@@ -25,7 +25,7 @@ type Signature = SignatureT Type
 data SignatureT t = ProcSig String [t] [t]
                   | FuncSig String [t] t deriving (Eq, Ord)
 
-type Source = SourceT Type
+-- type Source = SourceT Type
 data SourceT t = Source
   { functionDefinitions :: M.Map String (CallableDefT t)
   , typeDefinitions :: M.Map String TypeDef
@@ -161,3 +161,6 @@ data LiteralT t = ILit Integer t SourceRange
                 | Undef t SourceRange
                 deriving Show
 -- TODO: struct literals
+
+class Source a where
+  location :: a -> SourceRange

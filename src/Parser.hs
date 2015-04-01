@@ -2,20 +2,20 @@
 
 module Parser
 ( parseFile
-, SourceFile(..)
-, TypeDef(..)
-, Source
-, BracketToken(..)
-, CallableDef(..)
+, SourceFileT(..)
+, TypeDefT(..)
+, HiddenIdentifiers(..)
+, BracketTokenT(..)
+, CallableDefT(..)
 , Type(..)
 , Restriction(..)
 , NumSpec(..)
-, Statement(..)
-, Expression(..)
+, StatementT(..)
+, ExpressionT(..)
 , Literal(..)
 ) where
 
-import Ast (SourceLoc(..), SourceRange(..), TSize(..), BinOp(..), UnOp(..), TerminatorType(..))
+import Ast (SourceLoc(..), SourceRange(..), TSize(..), BinOp(..), UnOp(..), TerminatorType(..), Source, location)
 import Data.Functor ((<$>), (<$))
 import Data.Char (isLower)
 import Control.Applicative ((<*>), (<*))
@@ -67,8 +67,8 @@ callableDef = withPosition $
   (reserved "proc" >> makedef ProcDef commaSep commaSep) <|>
   (reserved "func" >> makedef FuncDef id id)
   where
-    makedef c m1 m2 = c
-                  <$> restrs
+    makedef c m1 m2 = c <$> identifier
+                  <*> restrs
                   <*> commaSep typeLiteral <* reservedOp "->"
                   <*> m1 typeLiteral
                   <*> commaSep identifier <* reservedOp "->"
@@ -203,12 +203,13 @@ typeDef :: Parser TypeDef
 typeDef = withPosition $ newType <|> alias
   where
     tParams = option [] . angles $ commaSep1 identifier
-    alias = Alias <$> tParams <*> typeLiteral
-    newType = NewType <$> tParams
-              <*> option [] (reserved "hide" >> commaSep1 identifier)
+    alias = Alias <$> identifier <*> tParams <*> typeLiteral
+    newType = NewType <$> identifier <*> tParams
+              <*> option (HideSome []) (reserved "hide" >> hidePattern)
               <*> many ((,) <$> identifier <*> replacement)
               <*> many ((,) <$> brPattern <*> replacement)
               <*> typeLiteral
+    hidePattern = replace reservedOp "*" HideAll <|> HideSome <$> commaSep1 identifier
     brPattern = brackets . many $
       (BrId <$> identifier <*> optionMaybe (reservedOp "=" >> expression))
       <|> (BrOp <$> operator)
@@ -315,45 +316,54 @@ dot = void $ char '.'
 replace :: Functor f => (a -> f c) -> a -> b -> f b
 replace f a b = b <$ f a
 
-data SourceFile = SourceFile
-  { typeDefinitions :: [TypeDef]
-  , callableDefinitions :: [CallableDef]
+type SourceFile = SourceFileT String
+data SourceFileT v = SourceFile
+  { typeDefinitions :: [TypeDefT v]
+  , callableDefinitions :: [CallableDefT v]
   }
 
-data TypeDef = NewType
-               { typeParams :: [String]
-               , hiddenIdentifiers :: [String]
-               , introducedIdentifiers :: [(String, (Maybe Expression, Expression))]
-               , bracketPatterns :: [([BracketToken], (Maybe Expression, Expression))]
-               , wrappedType :: Type
-               , typeRange :: SourceRange
-               }
-             | Alias
-               { typeParams :: [String]
-               , wrappedType :: Type
-               , typeRange :: SourceRange
-               }
-data BracketToken = BrId String (Maybe Expression)
-                  | BrOp String
+data HiddenIdentifiers = HideAll | HideSome [String]
+type Replacement v = (Maybe (ExpressionT v), ExpressionT v)
+type TypeDef = TypeDefT String
+data TypeDefT v = NewType
+                  { typeName :: String
+                  , typeParams :: [String]
+                  , hiddenIdentifiers :: HiddenIdentifiers
+                  , introducedIdentifiers :: [(String, Replacement v)]
+                  , bracketPatterns :: [([BracketTokenT v], Replacement v)]
+                  , wrappedType :: Type
+                  , typeRange :: SourceRange
+                  }
+                | Alias
+                  { typeName :: String
+                  , typeParams :: [String]
+                  , wrappedType :: Type
+                  , typeRange :: SourceRange
+                  }
+data BracketTokenT v = BrId String (Maybe (ExpressionT v))
+                     | BrOp String
 
-data CallableDef = FuncDef
-                   { restrictions :: [(String, Restriction)]
-                   , intypes :: [Type]
-                   , outtype :: Type
-                   , inargs :: [String]
-                   , outArg :: String
-                   , callableBody :: Statement
-                   , callableRange :: SourceRange
-                   }
-                 | ProcDef
-                   { restrictions :: [(String, Restriction)]
-                   , intypes :: [Type]
-                   , outtypes :: [Type]
-                   , inargs :: [String]
-                   , outargs :: [String]
-                   , callableBody :: Statement
-                   , callableRange :: SourceRange
-                   }
+type CallableDef = CallableDefT String
+data CallableDefT v = FuncDef
+                      { callableName :: String
+                      , restrictions :: [(String, Restriction)]
+                      , intypes :: [Type]
+                      , outtype :: Type
+                      , inargs :: [String]
+                      , outArg :: String
+                      , callableBody :: StatementT v
+                      , callableRange :: SourceRange
+                      }
+                    | ProcDef
+                      { callableName :: String
+                      , restrictions :: [(String, Restriction)]
+                      , intypes :: [Type]
+                      , outtypes :: [Type]
+                      , inargs :: [String]
+                      , outargs :: [String]
+                      , callableBody :: StatementT v
+                      , callableRange :: SourceRange
+                      }
 
 data Type = IntT TSize SourceRange
           | UIntT TSize SourceRange
@@ -369,23 +379,25 @@ data Restriction = PropertiesR [(String, Type)] [([Either String Type], Type)]
                  | NumR NumSpec
 data NumSpec = NoSpec | IntSpec | FloatSpec
 
-data Statement = ProcCall Expression [Expression] [Expression] SourceRange
-               | Defer Statement SourceRange
-               | ShallowCopy Expression Expression SourceRange
-               | If Expression Statement (Maybe Statement) SourceRange
-               | While Expression Statement SourceRange
-               | Scope [Statement] SourceRange
-               | Terminator TerminatorType SourceRange
-               | VarInit Bool String (Maybe Type) (Maybe Expression) SourceRange
+type Statement = StatementT String
+data StatementT v = ProcCall (ExpressionT v) [ExpressionT v] [ExpressionT v] SourceRange
+                  | Defer (StatementT v) SourceRange
+                  | ShallowCopy (ExpressionT v) (ExpressionT v) SourceRange
+                  | If (ExpressionT v) (StatementT v) (Maybe (StatementT v)) SourceRange
+                  | While (ExpressionT v) (StatementT v) SourceRange
+                  | Scope [StatementT v] SourceRange
+                  | Terminator TerminatorType SourceRange
+                  | VarInit Bool v (Maybe Type) (Maybe (ExpressionT v)) SourceRange
 
-data Expression = Bin BinOp Expression Expression SourceRange
-                | Un UnOp Expression SourceRange
-                | MemberAccess Expression String SourceRange
-                | Subscript Expression [Either String Expression] SourceRange
-                | Variable String SourceRange
-                | FuncCall Expression [Expression] SourceRange
-                | ExprLit Literal
-                | TypeAssertion Expression Type SourceRange
+type Expression = ExpressionT String
+data ExpressionT v = Bin BinOp (ExpressionT v) (ExpressionT v) SourceRange
+                   | Un UnOp (ExpressionT v) SourceRange
+                   | MemberAccess (ExpressionT v) String SourceRange
+                   | Subscript (ExpressionT v) [Either String (ExpressionT v)] SourceRange
+                   | Variable v SourceRange
+                   | FuncCall (ExpressionT v) [ExpressionT v] SourceRange
+                   | ExprLit Literal
+                   | TypeAssertion (ExpressionT v) Type SourceRange
 
 data Literal = ILit Integer SourceRange
              | FLit Double SourceRange
@@ -393,11 +405,9 @@ data Literal = ILit Integer SourceRange
              | Null SourceRange
              | Undef SourceRange
 
-class Source a where
-  location :: a -> SourceRange
-instance Source TypeDef where
+instance Source (TypeDefT v) where
   location = typeRange
-instance Source CallableDef where
+instance Source (CallableDefT v) where
   location = callableRange
 instance Source Type where
   location (IntT _ r) = r
@@ -407,7 +417,7 @@ instance Source Type where
   location (NamedT _ _ r) = r
   location (PointerT _ r) = r
   location (StructT _ r) = r
-instance Source Statement where
+instance Source (StatementT v) where
   location (ProcCall _ _ _ r) = r
   location (Defer _ r) = r
   location (ShallowCopy _ _ r) = r
@@ -416,7 +426,7 @@ instance Source Statement where
   location (Scope _ r) = r
   location (Terminator _ r) = r
   location (VarInit _ _ _ _ r) = r
-instance Source Expression where
+instance Source (ExpressionT v) where
   location (Bin _ _ _ r) = r
   location (Un _ _ r) = r
   location (MemberAccess _ _ r) = r
