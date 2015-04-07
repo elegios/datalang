@@ -15,7 +15,7 @@ module Parser
 , Literal(..)
 ) where
 
-import Ast (SourceLoc(..), SourceRange(..), TSize(..), BinOp(..), UnOp(..), TerminatorType(..), Source, location)
+import Ast (SourceLoc(..), SourceRange(..), TSize(..), BinOp(..), UnOp(..), TerminatorType(..), Source, location, NumSpec(..))
 import Data.Functor ((<$>), (<$))
 import Data.Char (isLower)
 import Control.Applicative ((<*>), (<*))
@@ -340,7 +340,7 @@ data TypeDefT v = NewType
                   , wrappedType :: Type
                   , typeRange :: SourceRange
                   }
-data BracketTokenT v = BrId String (Maybe (ExpressionT v))
+data BracketTokenT v = BrId v (Maybe (ExpressionT v))
                      | BrOp String
 
 type CallableDef = CallableDefT String
@@ -350,7 +350,7 @@ data CallableDefT v = FuncDef
                       , intypes :: [Type]
                       , outtype :: Type
                       , inargs :: [String]
-                      , outArg :: String
+                      , outarg :: String
                       , callableBody :: StatementT v
                       , callableRange :: SourceRange
                       }
@@ -377,7 +377,6 @@ data Type = IntT TSize SourceRange
 data Restriction = PropertiesR [(String, Type)] [([Either String Type], Type)]
                  | UIntR
                  | NumR NumSpec
-data NumSpec = NoSpec | IntSpec | FloatSpec
 
 type Statement = StatementT String
 data StatementT v = ProcCall (ExpressionT v) [ExpressionT v] [ExpressionT v] SourceRange

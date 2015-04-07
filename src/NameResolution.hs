@@ -26,6 +26,10 @@ data Resolved = Local
               | Global
                 { name :: String
                 }
+              | ReplacementLocal
+                { member :: Bool
+                , name :: String
+                }
 
 data ResolvedSource = ResolvedSource
   { types :: M.Map String (TypeDefT Resolved)
@@ -116,15 +120,15 @@ class Resolvable r where
 resolveTypeDef :: M.Map String (TypeDefT String) -> TypeDefT String -> Resolver (TypeDefT Resolved)
 resolveTypeDef _ (Alias tn tp w r) = return $ Alias tn tp w r
 resolveTypeDef tMap (NewType tn tp hi ai bp w r) = do
-  ids <- M.fromList . map (\n -> (n, Local 0 n)) <$> getIdentifiers tMap w
-  scope %= M.union (M.insert "self" (Local 0 "self") ids)
+  ids <- M.fromList . map (\n -> (n, ReplacementLocal True n)) <$> getIdentifiers tMap w
+  scope %= M.union (M.insert "self" (ReplacementLocal False "self") ids)
   ai' <- mapM resolveIdentifiers ai
   bp' <- mapM resolveBrackets bp
   return $ NewType tn tp hi ai' bp' w r
   where
     resolveReplacement (me, e) = (,) <$> T.mapM resolve me <*> resolve e
     resolveIdentifiers (i, rep) = (i,) <$> resolveReplacement rep
-    resolveBr (BrId n me) = BrId n <$> T.mapM resolve me
+    resolveBr (BrId n me) = BrId (ReplacementLocal False n) <$> T.mapM resolve me
     resolveBr (BrOp n) = return $ BrOp n
     resolveBrackets (p, rep) = do
       p' <- mapM resolveBr p
@@ -132,7 +136,7 @@ resolveTypeDef tMap (NewType tn tp hi ai bp w r) = do
       rep' <- resolveReplacement rep
       scope .= prevScope
       return (p', rep')
-      where newIds = M.fromList [(n, Local 1 n) | BrId n _ <- p]
+      where newIds = M.fromList [(n, ReplacementLocal False n) | BrId n _ <- p]
 
 getIdentifiers :: M.Map String (TypeDefT String) -> Type -> Resolver [String]
 getIdentifiers _ (StructT props _) = return $ fst <$> props
