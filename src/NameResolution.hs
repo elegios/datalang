@@ -1,4 +1,4 @@
-{-# LANGUAGE TemplateHaskell, TupleSections #-}
+{-# LANGUAGE TemplateHaskell, TupleSections, LambdaCase #-}
 
 module NameResolution
 ( resolveNames
@@ -13,6 +13,7 @@ import Data.Functor ((<$>))
 import Data.List ((\\))
 import Control.Lens hiding (both)
 import Control.Applicative ((<*>))
+import Control.Monad (zipWithM_)
 import Control.Monad.State (evalStateT, StateT, get, put)
 import Control.Monad.Except (runExceptT, ExceptT, MonadError, throwError)
 import qualified Data.Map as M
@@ -30,6 +31,8 @@ data Resolved = Local
                 { member :: Bool
                 , name :: String
                 }
+              | Self
+              deriving (Eq, Ord, Show)
 
 data ResolvedSource = ResolvedSource
   { types :: M.Map String (TypeDefT Resolved)
@@ -75,8 +78,35 @@ foldEithers = foldl foldF $ Right []
 mapWith :: Ord k => (a -> k) -> [a] -> M.Map k a
 mapWith f es = M.fromList $ zip (map f es) es
 
+define :: SourceRange -> String -> Resolved -> Resolver ()
+define sr n r@(Local d _) =
+  (scope . at n <<.= Just r) >>= \case
+    Just (Local d' _) | d == d' -> throwError . ErrorString $ "Redefinition of " ++ n ++ " at " ++ show sr
+    _ -> return ()
+
 instance Resolvable CallableDefT where
-  resolve d = resolve (callableBody d) >>= \b -> return $ d {callableBody = b}
+  resolve d@FuncDef{ inargs = is
+                   , outarg = o
+                   , callableBody = b } = do
+    let is' = Local 0 <$> is
+        o' = Local 0 o
+    prevScope <- use scope
+    zipWithM_ (define $ location d) is is'
+    define (location d) o o'
+    b' <- resolve b
+    scope .= prevScope
+    return $ d {callableBody = b', inargs = is', outarg = o'}
+  resolve d@ProcDef{ inargs = is
+                   , outargs = os
+                   , callableBody = b } = do
+    let is' = Local 0 <$> is
+        os' = Local 0 <$> os
+    prevScope <- use scope
+    zipWithM_ (define $ location d) is is'
+    zipWithM_ (define $ location d) os os'
+    b' <- resolve b
+    scope .= prevScope
+    return $ d {callableBody = b', inargs = is', outargs = os'}
 
 instance Resolvable StatementT where
   resolve (Defer s r) = Defer <$> resolve s <*> return r
@@ -97,7 +127,7 @@ instance Resolvable StatementT where
     me' <- T.mapM resolve me
     d <- use currentDepth
     let n' = Local d n
-    scope . at n ?= n'
+    define r n n'
     return $ VarInit mut n' mt me' r
 
 instance Resolvable ExpressionT where
@@ -121,7 +151,7 @@ resolveTypeDef :: M.Map String (TypeDefT String) -> TypeDefT String -> Resolver 
 resolveTypeDef _ (Alias tn tp w r) = return $ Alias tn tp w r
 resolveTypeDef tMap (NewType tn tp hi ai bp w r) = do
   ids <- M.fromList . map (\n -> (n, ReplacementLocal True n)) <$> getIdentifiers tMap w
-  scope %= M.union (M.insert "self" (ReplacementLocal False "self") ids)
+  scope %= M.union (M.insert "self" Self ids)
   ai' <- mapM resolveIdentifiers ai
   bp' <- mapM resolveBrackets bp
   return $ NewType tn tp hi ai' bp' w r

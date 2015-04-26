@@ -13,6 +13,7 @@ module Parser
 , StatementT(..)
 , ExpressionT(..)
 , Literal(..)
+, Replacement
 ) where
 
 import Ast (SourceLoc(..), SourceRange(..), TSize(..), BinOp(..), UnOp(..), TerminatorType(..), Source, location, NumSpec(..))
@@ -142,14 +143,14 @@ expression = buildExpressionParser expressionTable simpleExpression <?> "express
 type ExpOp = Operator StreamType StateType UnderlyingMonad Expression
 expressionTable :: [[ExpOp]]
 expressionTable =
-  [ [funcCall, memberAccess, subscript]
+  [ [post $ choice [funcCall, memberAccess, subscript]]
   , [pre "-" AriNegate, pre "$" Deref, pre "!" Not]
   , [bin "*" Times, bin "/" Divide, bin "%" Remainder]
   , [bin "+" Plus, bin "-" Minus]
   , [bin "<<" LShift, bin ">>" LogRShift, bin ">>>" AriRShift]
   , [bin "&" BinAnd]
   , [bin "|" BinOr]
-  , [typeAssertion]
+  , [post typeAssertion]
   , [bin "<" Lesser, bin ">" Greater, bin "<=" LE, bin ">=" GE, bin "==" Equal, bin "!=" NotEqual]
   , [bin "&&" ShortAnd]
   , [bin "||" ShortOr]
@@ -162,22 +163,25 @@ bin  name op = Infix (withPosition $ (\s e1 e2 -> Bin op e1 e2 s) <$ reservedOp 
 pre :: String -> UnOp -> ExpOp
 pre name op = Prefix (withPosition $ flip (Un op) <$ reservedOp name)
 
-postHelp :: (Expression -> i -> SourceRange -> Expression) -> Parser i -> ExpOp
-postHelp c p = Postfix . withPosition $ (\i r e -> c e i r) <$> p
+post :: Parser (Expression -> Expression) -> ExpOp
+post p = Postfix . chainl1 p . return $ flip (.)
 
-funcCall :: ExpOp
+postHelp :: (e -> i -> SourceRange -> e) -> Parser i -> Parser (e -> e)
+postHelp c p = withPosition $ (\i r e -> c e i r) <$> p
+
+funcCall :: Parser (Expression -> Expression)
 funcCall = postHelp FuncCall . parens $ commaSep expression
 
-subscript :: ExpOp
+subscript :: Parser (Expression -> Expression)
 subscript = postHelp Subscript . brackets . many $ brExpr <|> brOp
   where
     brExpr = Right <$> expression
     brOp = Left <$> operator
 
-memberAccess :: ExpOp
+memberAccess :: Parser (Expression -> Expression)
 memberAccess = postHelp MemberAccess $ dot >> identifier
 
-typeAssertion :: ExpOp
+typeAssertion :: Parser (Expression -> Expression)
 typeAssertion = postHelp TypeAssertion $ reservedOp ":" >> typeLiteral
 
 simpleExpression :: Parser Expression
@@ -203,19 +207,21 @@ typeDef :: Parser TypeDef
 typeDef = withPosition $ newType <|> alias
   where
     tParams = option [] . angles $ commaSep1 identifier
-    alias = Alias <$> identifier <*> tParams <*> typeLiteral
-    newType = NewType <$> identifier <*> tParams
+    alias = reserved "alias" >> Alias <$> identifier <*> tParams <*> typeLiteral
+    newType = reserved "type" >> NewType <$> identifier <*> tParams
+              <* reservedOp "{"
               <*> option (HideSome []) (reserved "hide" >> hidePattern)
               <*> many ((,) <$> identifier <*> replacement)
               <*> many ((,) <$> brPattern <*> replacement)
+              <* reservedOp "}"
               <*> typeLiteral
     hidePattern = replace reservedOp "*" HideAll <|> HideSome <$> commaSep1 identifier
     brPattern = brackets . many $
       (BrId <$> identifier <*> optionMaybe (reservedOp "=" >> expression))
       <|> (BrOp <$> operator)
-    replacement = (,) <$> optionMaybe (reservedOp "|" >> expression) <*> expression
+    replacement = (,) <$> optionMaybe (reservedOp "|" >> expression) <* reservedOp "->" <*> expression
 
-typeLiteral :: Parser Type
+typeLiteral :: Parser Type -- TODO: parse func and proc type literals
 typeLiteral = simpleTypeLiteral
           <|> namedTypeLiteral
           <|> pointerTypeLiteral
@@ -244,7 +250,7 @@ uintTypeLiteral = withPosition . choice . map (uncurry $ replace reserved) $ typ
                 ]
 
 namedTypeLiteral :: Parser Type
-namedTypeLiteral = withPosition $ typeVar <|> (NamedT <$> identifier <*> tParams)
+namedTypeLiteral = withPosition $ try typeVar <|> (NamedT <$> identifier <*> tParams)
   where
     tParams = option [] . angles $ commaSep1 typeLiteral
     typeVar = do
@@ -322,7 +328,7 @@ data SourceFileT v = SourceFile
   , callableDefinitions :: [CallableDefT v]
   }
 
-data HiddenIdentifiers = HideAll | HideSome [String]
+data HiddenIdentifiers = HideAll | HideSome [String] deriving Show
 type Replacement v = (Maybe (ExpressionT v), ExpressionT v)
 type TypeDef = TypeDefT String
 data TypeDefT v = NewType
@@ -342,6 +348,9 @@ data TypeDefT v = NewType
                   }
 data BracketTokenT v = BrId v (Maybe (ExpressionT v))
                      | BrOp String
+instance Show v => Show (BracketTokenT v) where
+  show (BrId v me) = maybe "" (const "optional ") me ++ show v
+  show (BrOp o) = show o
 
 type CallableDef = CallableDefT String
 data CallableDefT v = FuncDef
@@ -349,8 +358,8 @@ data CallableDefT v = FuncDef
                       , restrictions :: [(String, Restriction)]
                       , intypes :: [Type]
                       , outtype :: Type
-                      , inargs :: [String]
-                      , outarg :: String
+                      , inargs :: [v]
+                      , outarg :: v
                       , callableBody :: StatementT v
                       , callableRange :: SourceRange
                       }
@@ -359,8 +368,8 @@ data CallableDefT v = FuncDef
                       , restrictions :: [(String, Restriction)]
                       , intypes :: [Type]
                       , outtypes :: [Type]
-                      , inargs :: [String]
-                      , outargs :: [String]
+                      , inargs :: [v]
+                      , outargs :: [v]
                       , callableBody :: StatementT v
                       , callableRange :: SourceRange
                       }
@@ -373,6 +382,9 @@ data Type = IntT TSize SourceRange
           | TypeVar String SourceRange
           | PointerT Type SourceRange
           | StructT [(String, Type)] SourceRange
+          | ProcT [Type] [Type] SourceRange
+          | FuncT [Type] Type SourceRange
+          deriving (Show, Eq, Ord)
 
 data Restriction = PropertiesR [(String, Type)] [([Either String Type], Type)]
                  | UIntR

@@ -12,7 +12,12 @@ data SourceLoc = SourceLoc File Line Column deriving (Show, Eq, Ord)
 type File = String
 type Line = Int
 type Column = Int
-data SourceRange = SourceRange SourceLoc SourceLoc deriving (Eq, Ord)
+data SourceRange = SourceRange SourceLoc SourceLoc
+
+instance Eq SourceRange where
+  _ == _ = True
+instance Ord SourceRange where
+  compare _ _ = EQ
 
 nowhere :: SourceRange
 nowhere = SourceRange (SourceLoc "nowhere" 0 0) (SourceLoc "nowhere" 0 0)
