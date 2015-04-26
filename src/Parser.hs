@@ -1,4 +1,4 @@
-{-# LANGUAGE FlexibleContexts, TupleSections #-}
+{-# LANGUAGE FlexibleContexts, TupleSections, FlexibleInstances, MultiParamTypeClasses #-}
 
 module Parser
 ( parseFile
@@ -8,7 +8,6 @@ module Parser
 , BracketTokenT(..)
 , CallableDefT(..)
 , Type(..)
-, Restriction(..)
 , NumSpec(..)
 , StatementT(..)
 , ExpressionT(..)
@@ -19,6 +18,7 @@ module Parser
 import Ast (SourceLoc(..), SourceRange(..), TSize(..), BinOp(..), UnOp(..), TerminatorType(..), Source, location, NumSpec(..))
 import Data.Functor ((<$>), (<$))
 import Data.Char (isLower)
+import Data.Generics.Uniplate.Direct
 import Control.Applicative ((<*>), (<*))
 import Control.Monad.Identity
 import Text.Parsec hiding (runParser)
@@ -373,9 +373,23 @@ data Type = IntT TSize SourceRange
           | FuncT [Type] Type SourceRange
           deriving (Show, Eq, Ord)
 
-data Restriction = PropertiesR [(String, Type)] [([Either String Type], Type)]
-                 | UIntR
-                 | NumR NumSpec
+instance Uniplate Type where
+  uniplate (IntT s r) = plate IntT |- s |- r
+  uniplate (UIntT s r) = plate IntT |- s |- r
+  uniplate (FloatT s r) = plate FloatT |- s |- r
+  uniplate (BoolT r) = plate BoolT |- r
+  uniplate (NamedT n ts r) = plate NamedT |- n ||* ts |- r
+  uniplate (TypeVar n r) = plate TypeVar |- n |- r
+  uniplate (PointerT t r) = plate PointerT |* t |- r
+  uniplate (StructT ps r) = plate StructT ||+ ps |- r
+  uniplate (ProcT is os r) = plate ProcT ||* is ||* os |- r
+  uniplate (FuncT is o r) = plate FuncT ||* is |* o |- r
+
+instance Biplate (String, Type) Type where
+  biplate (s, t) = plate (,) |- s |* t
+instance Biplate [Type] Type where
+  biplate [] = plate []
+  biplate (t:ts) = plate (:) |* t ||* ts
 
 type Statement = StatementT String
 data StatementT v = ProcCall (ExpressionT v) [ExpressionT v] [ExpressionT v] SourceRange
