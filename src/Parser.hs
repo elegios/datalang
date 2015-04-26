@@ -69,22 +69,11 @@ callableDef = withPosition $
   (reserved "func" >> makedef FuncDef id id)
   where
     makedef c m1 m2 = c <$> identifier
-                  <*> restrs
                   <*> commaSep typeLiteral <* reservedOp "->"
                   <*> m1 typeLiteral
                   <*> commaSep identifier <* reservedOp "->"
                   <*> m2 identifier
                   <*> scope
-    restrs = option [] . braces $ many restriction
-
-restriction :: Parser (String, Restriction)
-restriction = (,) <$> identifier <*> (numR <|> uintR <|> propertiesR)
-  where
-    numR = replace reserved "num" (NumR NoSpec)
-       <|> replace reserved "int" (NumR IntSpec)
-       <|> replace reserved "float" (NumR FloatSpec)
-    uintR = replace reserved "uint" UIntR
-    propertiesR = (\(StructT ps _) -> PropertiesR ps) <$> structTypeLiteral <*> return []
 
 statement :: Parser Statement
 statement = procCall
@@ -355,7 +344,6 @@ instance Show v => Show (BracketTokenT v) where
 type CallableDef = CallableDefT String
 data CallableDefT v = FuncDef
                       { callableName :: String
-                      , restrictions :: [(String, Restriction)]
                       , intypes :: [Type]
                       , outtype :: Type
                       , inargs :: [v]
@@ -365,7 +353,6 @@ data CallableDefT v = FuncDef
                       }
                     | ProcDef
                       { callableName :: String
-                      , restrictions :: [(String, Restriction)]
                       , intypes :: [Type]
                       , outtypes :: [Type]
                       , inargs :: [v]
