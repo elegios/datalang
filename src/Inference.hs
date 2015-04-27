@@ -1,697 +1,642 @@
-{-# LANGUAGE TupleSections, TypeSynonymInstances, FlexibleInstances, TemplateHaskell, MultiParamTypeClasses #-}
+{-# LANGUAGE TupleSections, TypeSynonymInstances, FlexibleInstances, TemplateHaskell, MultiParamTypeClasses, FunctionalDependencies, LambdaCase, MultiWayIf #-}
 
-module Inference (fullInfer, infer) where
+module Inference (infer) where
 
-import Ast hiding (Type(..), Restriction, FuncDef, Expression, Statement, TypeDef(..))
+import Ast (SourceRange(..), TSize(..), BinOp(..), UnOp(..), TerminatorType(..), NumSpec(..), location)
+import NameResolution (Resolved(..))
+import Parser (HiddenIdentifiers)
+import Data.Maybe (fromMaybe, fromJust, isJust)
 import Data.Functor ((<$>))
-import Data.Function (on)
 import Data.STRef
-import Data.Tuple (swap)
-import Data.Char (isLower, isUpper)
 import Data.Generics.Uniplate.Direct
-import Data.Maybe (fromMaybe)
-import Control.Applicative ((<*>), (<*), getZipList, ZipList(..))
+import Control.Applicative ((<*>), Applicative, (<*))
 import Control.Monad.ST
 import Control.Monad.State
+import Control.Monad.Except (ExceptT, runExceptT, throwError, MonadError)
 import Control.Lens hiding (op, universe, plate)
-import qualified Ast
+import qualified Parser as P
 import qualified Data.Map as M
 import qualified Data.Set as S
 import qualified Data.List as List
+import qualified Data.Traversable as T
+import qualified Data.Foldable as F
 
-type UnifyError = String
-type UnifyErrorFunction = UnifyError -> ErrorMessage
+import Debug.Trace
 
-data Changeable = Changeable | Unchangeable String deriving (Eq, Show)
-data TypeVarTarget = Environment | Unbounds deriving Eq
-
-data ErrorMessage = ErrorString String deriving Show
-data InferrerState s = InferrerState
-  { _errors :: [ErrorMessage]
-  , _variables :: M.Map String (Inferred s)
-  , _typeVariables :: M.Map String (Inferred s)
-  , _functions :: M.Map String Ast.CallableDef
-  , _typeDefs :: M.Map String Ast.TypeDef
-  , _equals :: [[Inferred s]]
+data InferredSource = InferredSource
+  { types :: M.Map TypeKey FlatType
+  , callables :: M.Map Resolved (CallableDefT FlatType CompoundAccess)
   }
 
--- TODO: support for typeclasses and similar stuff
--- TODO: support newtyping newtypes with the original property names
-data Inferred s = IntT TSize
-                | UIntT TSize
-                | FloatT TSize
-                | BoolT
-                | NewType String [Inferred s] (Inferred s) Replacements
-                | Alias String [Inferred s] (Inferred s)
-                | PointerT (Inferred s)
-                | StructT [(String, Inferred s)]
-                | FunctionT [Inferred s] (Inferred s)
-                | ProcT [Inferred s] [Inferred s]
-                | Ref (TVarRef s)
+type ICallableDef s = CallableDefT (Inferred s) (ICompoundAccess s)
+type CallableDef = CallableDefT FlatType CompoundAccess
+data CallableDefT t a = FuncDef
+                        { callableName :: String
+                        , intypes :: [t]
+                        , outtype :: t
+                        , inargs :: [Resolved]
+                        , outarg :: Resolved
+                        , callableBody :: StatementT t a
+                        , callableRange :: SourceRange
+                        }
+                      | ProcDef
+                        { callableName :: String
+                        , intypes :: [t]
+                        , outtypes :: [t]
+                        , inargs :: [Resolved]
+                        , outargs :: [Resolved]
+                        , callableBody :: StatementT t a
+                        , callableRange :: SourceRange
+                        }
+
+type IStatement s = StatementT (Inferred s) (ICompoundAccess s)
+data StatementT t a = ProcCall (ExpressionT t a) [ExpressionT t a] [ExpressionT t a] SourceRange
+                    | Defer (StatementT t a) SourceRange
+                    | ShallowCopy (ExpressionT t a) (ExpressionT t a) SourceRange
+                    | If (ExpressionT t a) (StatementT t a) (Maybe (StatementT t a)) SourceRange
+                    | While (ExpressionT t a) (StatementT t a) SourceRange
+                    | Scope [StatementT t a] SourceRange
+                    | Terminator TerminatorType SourceRange
+                    | VarInit Bool Resolved t (ExpressionT t a) SourceRange
+
+type IExpression s = ExpressionT (Inferred s) (ICompoundAccess s)
+type Expression = ExpressionT FlatType CompoundAccess
+data ExpressionT t a = Bin BinOp (ExpressionT t a) (ExpressionT t a) SourceRange
+                     | Un UnOp (ExpressionT t a) SourceRange
+                     | CompoundAccess (ExpressionT t a) a SourceRange
+                     | Variable Resolved t SourceRange
+                     | FuncCall (ExpressionT t a) [ExpressionT t a] t SourceRange
+                     | ExprLit (LiteralT t)
+                     deriving Show
+
+type ICompoundAccess s = STRef s (MaybeExpanded s)
+data MaybeExpanded s = IUnExpanded (Inferred s) (IAccess s) (Inferred s)
+                     | IExpanded (IRepMap s) (Maybe (IExpression s)) (IExpression s)
+                     | IExpandedMember String
+                     | IExpandedSubscript (IExpression s)
+                     deriving Show
+
+type IRepMap s = M.Map Resolved (IExpression s, Inferred s)
+data IAccess s = IMember String | IBracket [Either String (IExpression s, Inferred s)] deriving Show
+
+type RepMap = M.Map Resolved Expression
+data CompoundAccess = Expanded RepMap (Maybe Expression) Expression
+                    | ExpandedMember String
+                    | ExpandedSubscript Expression
+
+type ILiteral s = LiteralT (Inferred s)
+data LiteralT t = ILit Integer t SourceRange
+                | FLit Double t SourceRange
+                | BLit Bool SourceRange
+                | Null t SourceRange
+                | Undef t SourceRange
+                | Zero t SourceRange
                 deriving Show
-data TVar s = Unbound (Restriction s) Changeable | Link (Inferred s) deriving (Eq, Show)
-type TVarRef s = STRef s (TVar s)
-instance Show (TVarRef s) where
-  show _ = "tref"
 
-instance Eq (Inferred s) where
-  (IntT s1) == (IntT s2) = s1 == s2
-  (UIntT s1) == (UIntT s2) = s1 == s2
-  (FloatT s1) == (FloatT s2) = s1 == s2
-  BoolT == BoolT = True
-  (NewType n1 ts1 _ _) == (NewType n2 ts2 _ _) = n1 == n2 && ts1 == ts2
-  (Alias n1 ts1 _) == (Alias n2 ts2 _) = n1 == n2 && ts1 == ts2
-  (Alias _ _ t1) == t2 = t1 == t2
-  t1 == (Alias _ _ t2) = t1 == t2
-  (PointerT t1) == (PointerT t2) = t1 == t2
-  (StructT ps1) == (StructT ps2) = ps1 == ps2
-  (FunctionT i1 o1) == (FunctionT i2 o2) = i1 == i2 && o1 == o2
-  (ProcT i1 o1) == (ProcT i2 o2) = i1 == i2 && o1 == o2
-  (Ref tvar1) == (Ref tvar2) = tvar1 == tvar2
-  _ == _ = False
+data IRestriction s = NoRestriction
+                    | PropertiesR [ICompoundAccess s]
+                    | UIntR
+                    | NumR NumSpec
+                    deriving (Show, Eq)
 
-instance Uniplate (Inferred s) where
-  uniplate (IntT s) = plate IntT |- s
-  uniplate (UIntT s) = plate UIntT |- s
-  uniplate (FloatT s) = plate FloatT |- s
-  uniplate BoolT = plate BoolT
-  uniplate (Alias n ts t) = plate Alias |- n ||* ts |* t
-  uniplate (NewType n ts t rs) = plate NewType |- n ||* ts |* t |- rs
-  uniplate (PointerT t) = plate PointerT |* t
-  uniplate s@(StructT props) = plateProject fromStruct toStruct s
-    where
-      fromStruct _ = snd <$> props
-      toStruct = StructT . zip (fst <$> props)
-  uniplate (FunctionT its ot) = plate FunctionT ||* its |* ot
-  uniplate (ProcT its ots) = plate ProcT ||* its ||* ots
-  uniplate (Ref r) = plate Ref |- r
-instance Biplate [Inferred s] (Inferred s) where
-  biplate (x:xs) = plate (:) |* x ||* xs
-  biplate x = plate x
+instance Show (ICompoundAccess s) where
+  show _ = "compoundaccess"
 
-type Restriction s = RestrictionT (Inferred s)
+newtype TypeKey = TypeKey Int deriving (Eq, Ord)
 
-type Inferrer s a = StateT (InferrerState s) (ST s) a
+data FlatType = IntT TSize
+              | UIntT TSize
+              | FloatT TSize
+              | BoolT
+              | NamedT String [TypeKey]
+              | TypeVar String
+              | PointerT TypeKey
+              | StructT [(String, TypeKey)]
+
+type IRep s = (Maybe (IExpression s), IExpression s)
+data Replacements s = Replacements
+                     HiddenIdentifiers
+                     (M.Map String (P.Replacement Resolved))
+                     [([P.BracketTokenT Resolved], P.Replacement Resolved)]
+data Inferred s = IInt TSize
+                | IUInt TSize
+                | IFloat TSize
+                | IBool
+                | INewType String [Inferred s] (Inferred s) (Replacements s)
+                | IPointer (Inferred s)
+                | IStruct [(String, Inferred s)]
+                | IFunc [Inferred s] (Inferred s)
+                | IProc [Inferred s] [Inferred s]
+                | IRef (TVarRef s)
+                deriving (Show, Eq, Ord)
+data TVar s = Unbound (IRestriction s) | Link (Inferred s) deriving (Eq, Show)
+data TVarRefT s a = TVarRef Int (STRef s a) deriving Eq
+type TVarRef s = TVarRefT s (TVar s)
+
+instance Eq (Replacements s) where
+  _ == _ = True
+instance Ord (Replacements s) where
+  compare _ _ = EQ
+
+instance Show (TVarRefT s a) where
+  show (TVarRef i _) = "tvarref" ++ show i
+instance Ord (TVarRefT s a) where
+  TVarRef i1 _ `compare` TVarRef i2 _ = i1 `compare` i2
+
+class Enterable a s b | a s -> b where
+  enter :: a -> Inferrer s b
+class EnterableWithType a s b | a s -> b where
+  enterT :: a -> Inferrer s (b, Inferred s)
+class Finalizable a s b | a s -> b where
+  exit :: a -> Finalizer s b
+
+data ErrorMessage = ErrorString String deriving Show
+
+type Inferrer s a = StateT (InferrerState s) (ExceptT ErrorMessage (ST s)) a
+type Finalizer s a = StateT (FinalizerState s) (ExceptT ErrorMessage (ST s)) a
+
+data InferrerState s = InferrerState
+                       { _typeDefs :: M.Map String (P.TypeDefT Resolved)
+                       , _callableDefs :: M.Map String (P.CallableDefT Resolved)
+                       , _typeVars :: M.Map String (Inferred s)
+                       , _locals :: M.Map Resolved (Inferred s)
+                       , _enteredNames :: M.Map P.Type (Inferred s)
+                       , _unexpandedCompounds :: [ICompoundAccess s]
+                       , _replacementContext :: Inferred s
+                       , _requestedGlobals :: [(Resolved, Inferred s)]
+                       , _equals :: S.Set (S.Set (Inferred s))
+                       , _refId :: Int
+                       }
+data FinalizerState s
+
+type ErrF = String -> ErrorMessage
+
+instance Show (Replacements s) where
+  show (Replacements hi ai ps) = "Replacements " ++ show hi ++ " " ++ show (M.keys ai) ++ " " ++ show (fst <$> ps)
 
 makeLenses ''InferrerState
+makeLenses ''FinalizerState
 
-fullInfer :: Source -> ([ErrorMessage], Source)
-fullInfer source = (reverse errs, newSource)
+infer :: P.CallableDefT Resolved -> InferrerState s -> ST s (Either ErrorMessage (ICallableDef s))
+infer d s = runExceptT $ evalStateT (enter d) s
+
+instance Enterable (P.CallableDefT Resolved) s (ICallableDef s) where
+  enter d@P.FuncDef{} = withCallableType d $ FuncDef (P.callableName d)
+    <$> mapM enter (P.intypes d)
+    <*> enter (P.outtype d)
+    <*> return (P.inargs d)
+    <*> return (P.outarg d)
+    <*> enter (P.callableBody d)
+    <*> return (P.callableRange d)
+  enter d@P.ProcDef{} = withCallableType d $ ProcDef (P.callableName d)
+    <$> mapM enter (P.intypes d)
+    <*> mapM enter (P.outtypes d)
+    <*> return (P.inargs d)
+    <*> return (P.outargs d)
+    <*> enter (P.callableBody d)
+    <*> return (P.callableRange d)
+
+instance Enterable P.Type s (Inferred s) where
+  enter (P.IntT s _) = return $ IInt s
+  enter (P.UIntT s _) = return $ IUInt s
+  enter (P.FloatT s _) = return $ IFloat s
+  enter (P.BoolT _) = return IBool
+  enter nt@(P.NamedT n _ sr) = use (enteredNames . at nt) >>= maybe construct return
+    where
+      construct = do
+        IRef r <- newUnbound NoRestriction
+        enteredNames . at nt ?= IRef r
+        t <- use (typeDefs . at n) >>= \case -- TODO: move unknown to nameresolution
+          Nothing -> throwError . ErrorString $ "Unknown type name " ++ n ++ " at " ++ show sr
+          Just P.Alias{ P.typeParams = ps
+                      , P.wrappedType = w } ->
+            snd <$> withTypeVars nt ps (enter w)
+          Just P.NewType{ P.typeParams = ps
+                        , P.hiddenIdentifiers = hi
+                        , P.introducedIdentifiers = ai
+                        , P.bracketPatterns = bp
+                        , P.wrappedType = w } -> do
+            (ts', w') <- withTypeVars nt ps $ enter w
+            return . INewType n ts' w' $ Replacements hi (M.fromList ai) bp
+        writeRef r $ Link t
+        return t
+  enter (P.TypeVar n r) = use (typeVars . at n) >>= justErr (ErrorString $ "Unknown type variable " ++ n ++ " at " ++ show r)
+  enter (P.PointerT t _) = IPointer <$> enter t
+  enter (P.StructT ps _) = IStruct <$> mapM (return `pairA` enter) ps
+  enter (P.ProcT is os _) = IProc <$> mapM enter is <*> mapM enter os
+  enter (P.FuncT is o _) = IFunc <$> mapM enter is <*> enter o
+
+instance Enterable (P.StatementT Resolved) s (IStatement s) where
+  enter (P.ProcCall p is os r) = do
+    (p', t) <- enterT p
+    (is', its) <- unzip <$> mapM enterT is
+    (os', ots) <- unzip <$> mapM enterT os
+    makeProc errF t its ots
+    return $ ProcCall p' is' os' r
+    where errF m = ErrorString $ show r ++ ": " ++ m
+  enter (P.Defer s r) = Defer <$> enter s <*> return r
+  enter (P.ShallowCopy var e r) = do
+    (var', varT) <- enterT var
+    (e', et) <- enterT e
+    unify errF varT et
+    return $ ShallowCopy var' e' r
+    where errF m = ErrorString $ "Assignment at " ++ show r ++ ": " ++ m
+  enter (P.If c t me r) = do
+    (c', ct) <- enterT c
+    unify errF ct IBool
+    If c' <$> enter t <*> T.mapM enter me <*> return r
+    where errF m = ErrorString $ "Condition in if at " ++ show r ++ " must be bool: " ++ m
+  enter (P.While c s r) = do
+    (c', ct) <- enterT c
+    unify errF ct IBool
+    While c' <$> enter s <*> return r
+    where errF m = ErrorString $ "Condition in while at " ++ show r ++ " must be bool: " ++ m
+  enter (P.Scope s r) = do
+    prevLocals <- use locals
+    Scope <$> mapM enter s <*> return r <* (locals .= prevLocals)
+  enter (P.Terminator t r) = return $ Terminator t r
+  enter (P.VarInit mut n t me r) = do -- TODO: deal with mutability at type level?
+    (e', t') <- T.mapM enterT me >>= \case
+      Just (e, et) -> T.mapM (enter >=> unify errF et) t >> return (e, et)
+      Nothing -> (,) <$> (ExprLit <$> (Zero <$> newUnbound NoRestriction <*> return r))
+                     <*> (justErr internal t >>= enter)
+    locals . at n ?= t'
+    return $ VarInit mut n t' e' r
+    where
+      errF m = ErrorString $ "Type mismatch in let at " ++ show r ++ ": " ++ m
+      internal = ErrorString $ "Compiler error: neither type nor expr at " ++ show r
+
+instance Enterable (P.ExpressionT Resolved) s (IExpression s) where
+  enter = fmap fst . enterT
+instance EnterableWithType (P.ExpressionT Resolved) s (IExpression s) where
+  enterT (P.Bin o e1 e2 r) = do
+    (e1', e1t) <- enterT e1
+    (e2', e2t) <- enterT e2
+    unify unifyErr e1t e2t
+    (Bin o e1' e2' r,) <$>
+      if | o == Remainder -> restrict intErr e1t $ NumR IntSpec
+         | o `elem` [Equal, NotEqual] -> return IBool
+         | o `elem` [Plus, Minus, Times, Divide] -> restrict numErr e1t $ NumR NoSpec
+         | o `elem` [BinAnd, BinOr, LShift, LogRShift, AriRShift, Xor] -> restrict uintErr e1t UIntR
+         | o `elem` [Lesser, Greater, LE, GE] -> restrict numErr e1t (NumR NoSpec) >> return IBool
+    where
+      unifyErr m = ErrorString $ "Could not unify expression types around " ++ show o ++ " at " ++ show r ++ ". " ++ m
+      numErr m = ErrorString $ "Expressions at " ++ show r ++ " must have a numerical type. " ++ m
+      uintErr m = ErrorString $ "Expressions at " ++ show r ++ " must have a uint type. " ++ m
+      intErr m = ErrorString $ "Expressions at " ++ show r ++ " must have an int type. " ++ m
+  enterT (P.Un o e r) = do
+    (e', t) <- enterT e
+    (Un o e' r,) <$> case o of
+      Deref -> derefPtr ptrErr t
+      AddressOf -> return $ IPointer t
+      AriNegate -> restrict numErr t $ NumR NoSpec
+      BinNegate -> restrict uintErr t UIntR
+      Not -> makeBool boolErr t
+    where
+      ptrErr = mustBeA "pointer"
+      numErr = mustBeA "number"
+      uintErr = mustBeA "uint"
+      boolErr = mustBeA "bool"
+      mustBeA t m = ErrorString $ "Expression at " ++ show (location e) ++ " must be a " ++ t ++ ": " ++ m
+  enterT (P.MemberAccess e prop r) = do
+    (e', t) <- enterT e
+    (a, it) <- newICompound errF t $ IMember prop
+    initialExpand a
+    return (CompoundAccess e' a r, it)
+    where errF m = ErrorString $ "Expression at " ++ show (location e) ++ " must have a property " ++ prop ++ ": " ++ m
+  enterT (P.Subscript e bp r) = do
+    (e', t) <- enterT e
+    (a, it) <- mapM (T.mapM enterT) bp >>= newICompound errF t . IBracket
+    initialExpand a
+    return (CompoundAccess e' a r, it)
+    where errF m = ErrorString $ "Expression at " ++ show (location e) ++ " does not support the []-expression at " ++ show r ++ ": " ++ m
+  enterT (P.Variable n r) = case n of
+    Self -> use replacementContext >>= \t -> return (Variable n t r, t)
+    ReplacementLocal True prop -> do
+      t <- use replacementContext
+      (a, it) <- newICompound locErr t $ IMember prop
+      initialExpand a
+      return (CompoundAccess (Variable Self t r) a r, it)
+    Global g -> use (callableDefs . at g) >>= \case
+      Nothing -> throwError . ErrorString $ "Compiler error: unknown global " ++ g ++ " at " ++ show r
+      Just def -> do
+        t <- createCallableType def
+        requestedGlobals %= ((n,t):)
+        return (Variable n t r, t)
+    _ -> use (locals . at n) >>= justErr resErr >>= \t -> return (Variable n t r, t)
+    where
+      locErr m = ErrorString $ "Compiler error: unsupported replacementlocal: " ++ m
+      resErr = ErrorString $ "Compiler error: var " ++ show n ++ " at " ++ show r ++ " not found"
+  enterT (P.FuncCall f is r) = do
+    (f', t) <- enterT f
+    (is', its) <- unzip <$> mapM enterT is
+    ret <- getFuncReturn errF t its
+    return (FuncCall f' is' ret r, t)
+    where errF m = ErrorString $ "Expression at " ++ show (location f) ++ " must be a func: " ++ m
+  enterT (P.ExprLit l) = (_1 %~ ExprLit) <$> enterT l
+  enterT (P.TypeAssertion e t r) = do
+    (e', et) <- enterT e
+    enter t >>= unify errF et
+    return (e', et)
+    where errF m = ErrorString $ "Failed type assertion at " ++ show r ++ ": " ++ m
+
+instance EnterableWithType P.Literal s (ILiteral s) where
+  enterT (P.ILit i r) = litF (ILit i) r $ NumR NoSpec -- BUG: no uint literals
+  enterT (P.FLit f r) = litF (FLit f) r $ NumR FloatSpec
+  enterT (P.BLit b r) = return (BLit b r, IBool)
+  enterT (P.Null r) = do
+    u <- newUnbound NoRestriction
+    return (Null (IPointer u) r, IPointer u)
+  enterT (P.Undef r) = litF Undef r NoRestriction
+
+litF :: (Inferred s -> SourceRange -> ILiteral s) -> SourceRange -> IRestriction s -> Inferrer s (ILiteral s, Inferred s)
+litF constr r restr = newUnbound restr >>= (\t -> return (constr t r, t))
+
+newICompound :: ErrF -> Inferred s -> IAccess s -> Inferrer s (ICompoundAccess s, Inferred s)
+newICompound errF t a = do
+  u <- newUnbound NoRestriction
+  ca <- lift . lift $ newSTRef (IUnExpanded t a u)
+  restrict errF t $ PropertiesR [ca]
+  return (ca, u)
+
+  --TODO: remove undefined
+initialExpand :: ICompoundAccess s -> Inferrer s ()
+initialExpand a = attemptCompoundExpand undefined a >> compoundExpanded a >>= \case
+  True -> return ()
+  False -> unexpandedCompounds %= (a:)
+
+attemptCompoundExpand :: ErrF -> ICompoundAccess s -> Inferrer s ()
+attemptCompoundExpand errF r = readRef r >>= \case
+  IUnExpanded t (IMember m) retty -> memberAccess t
+    where
+      memberAccess = readTillNonPointer >=> \case
+        Nothing -> return ()
+        Just (IStruct ps) | isJust mT -> do
+          unify errF retty $ fromJust mT
+          writeRef r $ IExpandedMember m
+          where mT = List.lookup m ps
+        Just u@(INewType _ _ w (Replacements hi ai _)) -> case M.lookup m ai of
+          Nothing -> case hi of
+            P.HideSome hidden | m `notElem` hidden -> memberAccess w
+            _ -> throwError . errF $ show u ++ " has no member " ++ m
+          Just rep -> do
+            prevReplacementContext <- replacementContext <<.= w
+            expand retty rep M.empty
+            replacementContext .= prevReplacementContext
+        Just u -> throwError . errF $ show u ++ " has no member " ++ m
+  IUnExpanded t (IBracket bp) retty ->
+    readTillType t >>= \case
+      Nothing -> return ()
+      Just (IPointer it) -> case bp of
+        [Right (e, intT)] -> do
+          restrict errF intT (NumR IntSpec)
+          unify errF retty it
+          writeRef r $ IExpandedSubscript e
+        _ -> throwError . errF $ "A pointer only supports [int]"
+      Just u@(INewType _ _ w (Replacements _ _ ntbp)) -> do
+        useMatch <- justErr err . msum $ match <$> ntbp
+        prevReplacementContext <- replacementContext <<.= w
+        useMatch
+        replacementContext .= prevReplacementContext
+        where
+          match (pattern, rep) = (>>= expand retty rep) <$> inner pattern bp
+          inner [] [] = Just $ return M.empty
+          inner (P.BrId n _ : pTail) (Right rep : bpTail) =
+            (M.insert n rep <$>) <$> inner pTail bpTail
+          inner (P.BrId n (Just rep) : pTail) bpTail =
+            (M.insert n <$> enterT rep <*>) <$> inner pTail bpTail
+          inner (P.BrOp o : pTail) (Left o' : bpTail)
+            | o == o' = inner pTail bpTail
+          inner _ _ = Nothing
+          err = errF $ show u ++ " has no []-expression matching " ++ show bp
+      Just u -> throwError . ErrorString $ show u ++ " has no []-expression matching " ++ show bp
+  e -> trace ("double expand: " ++ show e) $ return () -- NOTE: already expanded
   where
-    funcs = functionDefinitions source
-    types = typeDefinitions source
-    (errs, newFuncDefs) = M.mapAccum (infer funcs types) [] funcs
-    newSource = source { functionDefinitions = newFuncDefs }
+    expand retty (me, e) irepmap = do
+      prevLocals <- locals <<%= M.union (snd <$> irepmap)
+      me' <- T.mapM (enterT >=> \(e', et) -> unify errF IBool et >> return e') me
+      (e', t) <- enterT e
+      unify errF retty t
+      writeRef r $ IExpanded irepmap me' e'
+      locals .= prevLocals
+    readTillType (IRef tref) = readRef tref >>= \case
+      Link t -> readTillType t
+      _ -> return Nothing
+    readTillType t = return $ Just t
+    readTillNonPointer (IRef tref) = readRef tref >>= \case
+      Link t -> readTillNonPointer t
+      _ -> return Nothing
+    readTillNonPointer (IPointer t) = readTillNonPointer t
+    readTillNonPointer t = return $ Just t
 
-infer :: M.Map String Ast.CallableDef -> M.Map String Ast.TypeDef -> [ErrorMessage] -> Ast.CallableDef -> ([ErrorMessage], Ast.CallableDef)
-infer funcs types errs def = runST $ convertOutput <$> runStateT inference initState
+compoundExpanded :: ICompoundAccess s -> Inferrer s Bool
+compoundExpanded a = readRef a >>= \case
+  IUnExpanded{} -> return False
+  _ -> return True
+
+makeProc :: ErrF -> Inferred s -> [Inferred s] -> [Inferred s] -> Inferrer s ()
+makeProc errF (IProc is os) newIs newOs
+  | length is == length newIs && length os == length newOs
+    = zipWithM_ (unify errF) is newIs >> zipWithM_ (unify errF) os newOs
+  | otherwise = throwError . errF $ "Got an incorrect number of arguments, got # " ++
+                show (length newIs) ++ " # " ++ show (length newOs) ++ ", wanted # " ++
+                show (length is) ++ " # " ++ show (length os)
+makeProc errF (IRef r) is os = readRef r >>= \case
+  Unbound NoRestriction -> writeRef r . Link $ IProc is os
+  u@Unbound{} -> throwError . errF $ "Cannot change " ++ show u ++ " into a proc"
+  Link t -> makeProc errF t is os
+makeProc errF u _ _ = throwError . errF $ show u ++ " cannot be a proc"
+
+getFuncReturn :: ErrF -> Inferred s -> [Inferred s] -> Inferrer s (Inferred s)
+getFuncReturn errF (IFunc is ret) newIs
+  | length is == length newIs = zipWithM_ (unify errF) is newIs >> return ret
+  | otherwise = throwError . errF $ "Got an incorrect number of arguments, got " ++
+                show (length newIs) ++ ", wanted " ++ show (length is)
+getFuncReturn errF (IRef r) is = readRef r >>= \case
+  Unbound NoRestriction -> do
+    u <- newUnbound NoRestriction
+    writeRef r . Link $ IFunc is u
+    return u
+  Link t -> getFuncReturn errF t is
+  u -> throwError . errF $ "Cannot change " ++ show u ++ " into a func"
+getFuncReturn errF u _ = throwError . errF $ show u ++ " cannot be a func"
+
+makeBool :: ErrF -> Inferred s -> Inferrer s (Inferred s)
+makeBool _ IBool = return IBool
+makeBool errF ir@(IRef r) = readRef r >>= \case
+  Unbound NoRestriction -> writeRef r (Link IBool) >> return ir
+  Link t -> makeBool errF t
+  u -> throwError . errF $ show u ++ " cannot be a bool"
+
+derefPtr :: ErrF -> Inferred s -> Inferrer s (Inferred s)
+derefPtr _ (IPointer t) = return t
+derefPtr errF (IRef r) = readRef r >>= \case
+  Unbound NoRestriction -> do
+    u <- newUnbound NoRestriction
+    writeRef r . Link $ IPointer u
+    return u
+  Link t -> derefPtr errF t
+  u -> throwError . errF $ show u ++ " cannot be a pointer"
+
+createCallableType :: P.CallableDefT v -> Inferrer s (Inferred s)
+createCallableType d@P.FuncDef{P.intypes = its, P.outtype = ot} =
+  withCallableType d $ IFunc <$> mapM enter its <*> enter ot
+
+createCallableType d@P.ProcDef{P.intypes = its, P.outtypes = ots} =
+  withCallableType d $ IProc <$> mapM enter its <*> mapM enter ots
+
+withCallableType :: P.CallableDefT v -> Inferrer s a -> Inferrer s a
+withCallableType d m = do
+  newTypeVars <- M.fromList <$> mapM makeVar typevars
+  prevTypeVars <- typeVars <<%= M.union newTypeVars
+  m <* (typeVars .= prevTypeVars)
   where
-    initState = InferrerState errs M.empty M.empty funcs types []
-    inference = enterInfer def >>= exitInfer
-    convertOutput = (_1 %~ view errors) . swap
+    makeVar n = (n,) <$> newUnbound NoRestriction
+    typevars = [n | P.TypeVar n _ <- universeBi ts]
+    ts = case d of
+      P.FuncDef{P.intypes = its, P.outtype = ot} -> ot : its
+      P.ProcDef{P.intypes = its, P.outtypes = ots} -> its ++ ots
 
-enterInfer :: CallableDefT Ast.Type -> Inferrer s (CallableDefT (Inferred s))
-enterInfer (Ast.ProcDef inTs outTs restrs ins outs body sr) = do
-  ProcT inTs' outTs' <- convertProcSig restrs inTs outTs Environment
-  variables %= M.union (M.fromList $ zip (ins ++ outs) (inTs' ++ outTs'))
-  body' <- enterStatement body
-  return $ Ast.ProcDef inTs' outTs' restrs ins outs body' sr
+newUnbound :: IRestriction s -> Inferrer s (Inferred s)
+newUnbound restr =
+  IRef <$> (TVarRef <$> (refId <<+= 1) <*> (lift . lift . newSTRef $ Unbound restr))
 
-enterInfer (Ast.FuncDef inTs outT restrs ins out body sr) = do
-  ProcT inTs' [outT'] <- convertProcSig restrs inTs [outT] Environment
-  variables %= M.union (M.fromList $ zip (out : ins) (outT' : inTs'))
-  body' <- enterStatement body
-  return $ Ast.FuncDef inTs' outT' restrs ins out body' sr
-
-enterStatement :: StatementT Ast.Type -> Inferrer s (StatementT (Inferred s))
-enterStatement (ProcCall pName inexprs outexprs sr) = do
-  (inexprs', inTs) <- unzip <$> mapM enterExpression inexprs
-  (outexprs', outTs) <- unzip <$> mapM enterExpression outexprs
-  unifyExternalFunction (ProcSig pName inTs outTs) sr
-  return $ ProcCall pName inexprs' outexprs' sr
-
-enterStatement (Defer stmnt sr) = Defer <$> enterStatement stmnt <*> return sr
-
-enterStatement (ShallowCopy assignee value sr) = do
-  (assignee', assigneeT) <- enterExpression assignee
-  (value', valueT) <- enterExpression value
-  unify err assigneeT valueT
-  return $ ShallowCopy assignee' value' sr
-  where err unifyError = ErrorString $ "Type mismatch in assignment at " ++ show sr ++ ", the type of the left and right hand side expressions cannot be unified: " ++ unifyError
-
-enterStatement (If condition thenStmnt mElseStmnt sr) = do
-  (condition', condT) <- enterExpression condition
-  makeBool err condT
-  If condition' <$> enterStatement thenStmnt <*> elseStmnt' <*> return sr
+unify :: ErrF -> Inferred s -> Inferred s -> Inferrer s ()
+unify errF t1 t2 = equalOr $ case (t1, t2) of
+  (IRef uncompressedR1, IRef uncompressedR2) -> do
+    r1 <- readRef uncompressedR1 >>= linkCompression uncompressedR1
+    r2 <- readRef uncompressedR2 >>= linkCompression uncompressedR2
+    unless (r1 == r2) $ (,) <$> readRef r1 <*> readRef r2 >>= \case
+      (Unbound restr, Unbound _) ->
+        writeRef r1 (Link $ IRef r2) >> applyRestriction errF (IRef r2) restr
+      (_, Link t) -> unifyRef t r1
+      (Link t, _) -> unifyRef t r2
+  (IRef r, t) -> readRef r >>= linkCompression r >>= unifyRef t
+  (t, IRef r) -> readRef r >>= linkCompression r >>= unifyRef t
+  (INewType n1 t1s _ _, INewType n2 t2s _ _) | n1 == n2 -> zipWithM_ uni t1s t2s
+  (IPointer i1, IPointer i2) -> uni i1 i2
+  (IStruct p1, IStruct p2) | p1names == p2names -> zipWithM_ uni p1ts p2ts
+    where
+      (p1names, p1ts) = unzip p1
+      (p2names, p2ts) = unzip p2
+  (IProc i1 o1, IProc i2 o2) | length i1 == length i2 && length o1 == length o2 -> do
+    zipWithM_ uni i1 i2
+    zipWithM_ uni o1 o2
+  (IFunc i1 o1, IFunc i2 o2) | length i1 == length i2 -> do
+    zipWithM_ uni i1 i2
+    uni o1 o2
   where
-    elseStmnt' = maybe (return Nothing) (fmap Just . enterStatement) mElseStmnt
-    err unifyError = ErrorString $ "Type mismatch in if statement at " ++ show sr ++ ", condition must have type Bool: " ++ unifyError
-
-enterStatement (While condition stmnt sr) = do
-  (condition', condT) <- enterExpression condition
-  makeBool err condT
-  While condition' <$> enterStatement stmnt <*> return sr
-  where err unifyError = ErrorString $ "Type mismatch in while statement at " ++ show sr ++ ", condition must have type Bool: " ++ unifyError
-
-enterStatement (Scope stmnts sr) = do
-  prevVariables <- use variables
-  stmnts' <- mapM enterStatement stmnts
-  variables .= prevVariables
-  return $ Scope stmnts' sr
-
-enterStatement (Terminator terminator sr) = return $ Terminator terminator sr
-
--- TODO: deal with mutability, ensure nothing strange happens
-enterStatement (VarInit mutable vName t expr sr) = do
-  convertedT <- convert t
-  (expr', exprT) <- enterExpression expr
-  unify err convertedT exprT
-  variables . at vName ?= convertedT
-  return $ VarInit mutable vName convertedT expr' sr
-  where err unifyError = ErrorString $ "Type mismatch in variable declaration at " ++ show sr ++ ": " ++ unifyError
-
-enterExpression :: ExpressionT Ast.Type -> Inferrer s (ExpressionT (Inferred s), Inferred s)
-enterExpression (Bin op expr1 expr2 sr) = do
-  (expr1', tref1) <- enterExpression expr1
-  (expr2', tref2) <- enterExpression expr2
-  unify unifyErr tref1 tref2
-  (Bin op expr1' expr2' sr,) <$> case () of
-    _ | op == Remainder -> restrict intErr (NumR IntSpec) tref1
-    _ | op `elem` [Equal, NotEqual] -> return BoolT
-    _ | op `elem` [Plus, Minus, Times, Divide] -> restrict numErr (NumR NoSpec) tref1
-    _ | op `elem` [BinAnd, BinOr, LShift, LogRShift, AriRShift, Xor] -> restrict uintErr UIntR tref1
-    _ | op `elem` [Lesser, Greater, LE, GE] -> restrict numErr (NumR NoSpec) tref1 >> return BoolT
-  where
-    unifyErr m = ErrorString $ "Could not unify expression types around " ++ show op ++ " at " ++ show sr ++ ". " ++ show m
-    numErr m = ErrorString $ "Expressions at " ++ show sr ++ " must have a numerical type. " ++ show m
-    uintErr m = ErrorString $ "Expressions at " ++ show sr ++ " must have a uint type. " ++ show m
-    intErr m = ErrorString $ "Expressions at " ++ show sr ++ " must have an int type. " ++ show m
-
-enterExpression (Un Deref expr sr) = do
-  (expr', tref) <- enterExpression expr
-  innerTref <- makePointer errF tref
-  return . (, innerTref) $ Un Deref expr' sr
-  where errF m = ErrorString $ "Expression at " ++ show sr ++ " must be a pointer. " ++ show m
-
-enterExpression (Un AddressOf expr sr) = do
-  (expr', t) <- enterExpression expr
-  return (Un AddressOf expr' sr, PointerT t)
-
-enterExpression (Un AriNegate expr sr) = do
-  (expr', tref) <- enterExpression expr
-  restrict errF UIntR tref
-  return . (, tref) $ Un AriNegate expr' sr
-  where errF m = ErrorString $ "Expression at " ++ show sr ++ " must be a uint type. " ++ show m
-
-enterExpression (Un BinNegate expr sr) = do
-  (expr', tref) <- enterExpression expr
-  restrict errF UIntR tref
-  return . (, tref) $ Un BinNegate expr' sr
-  where errF m = ErrorString $ "Expression at " ++ show sr ++ " must be a uint type. " ++ show m
-
-enterExpression (Un Not expr sr) = do
-  (expr', tref) <- enterExpression expr
-  makeBool errF tref
-  return . (, tref) $ Un Not expr' sr
-  where errF m = ErrorString $ "Expression at " ++ show sr ++ " must be of type bool. " ++ show m
-
-enterExpression (MemberAccess expr member sr) = do
-  (expr', tref) <- enterExpression expr
-  memberTref <- accessProperty errF member tref
-  return . (, memberTref) $ MemberAccess expr' member sr
-  where errF m = ErrorString $ "Expression at " ++ show sr ++ " has no property " ++ member ++ ". " ++ show m
-
-enterExpression (Subscript expr brExprs sr) = do
-  (expr', t) <- enterExpression expr
-  (brExprs', retT) <- mapM enterBracketExpr brExprs >>= accessBracket errF t
-  return (Subscript expr' brExprs' sr, retT)
-  where
-    enterBracketExpr (BracketExpr brExpr isr) = (_1 %~ flip BracketExpr isr) <$> enterExpression brExpr
-    enterBracketExpr (BracketExprOp op isr) = return (BracketExprOp op isr, undefined)
-    errF m = ErrorString $ "Expression at " ++ show sr ++ " has no []-expression matching the one given. " ++ show m
-
-enterExpression (Variable vName sr) =
-  use (variables . at vName) >>= (fmap (Variable vName sr, ) . maybe notFound return)
-  where notFound = errorReturn . ErrorString $ vName ++ " is not in scope at " ++ show sr
-
-enterExpression (FuncCall fName inExprs t sr) = do
-  (inExprs', inTs) <- unzip <$> mapM enterExpression inExprs
-  convertedT <- convert t
-  unifyExternalFunction (FuncSig fName inTs convertedT) sr
-  return (FuncCall fName inExprs' convertedT sr, convertedT)
-
-enterExpression (ExprLit lit sr) = (_1 %~ (`ExprLit` sr)) <$> enterLiteral lit
-
-enterExpression (TypeAssertion expr t sr) = do
-  t' <- convert t
-  (expr', innerT) <- enterExpression expr
-  unify errF innerT t'
-  return (expr', t')
-  where errF m = ErrorString $ "Failed type assertion at " ++ show sr ++ ": " ++ show m
-
-enterExpression (Zero t) = buildReturn (Zero, id) <$> convert t
-
-enterLiteral :: LiteralT Ast.Type -> Inferrer s (LiteralT (Inferred s), Inferred s)
-enterLiteral (ILit n t sr) = buildReturn (\tref -> ILit n tref sr, id) <$> (convert t >>= restrict errF (NumR NoSpec))
-  where errF m = ErrorString $ "How did you even get this error (int)? " ++ show sr ++ " -- "++ show m
-
-enterLiteral (FLit n t sr) = buildReturn (\tref -> FLit n tref sr, id) <$> (convert t >>= restrict errF (NumR FloatSpec))
-  where errF m = ErrorString $ "How did you even get this error (float)? " ++ show sr ++ " -- " ++ show m
-
-enterLiteral (BLit v sr) = return (BLit v sr, BoolT)
-
-enterLiteral (Null Ast.UnknownT sr) =
-  buildReturn ((`Null` sr), id) . PointerT <$> newUnbound NoRestriction
-
-buildReturn :: (t -> a, t -> b) -> t -> (a, b)
-buildReturn (a, b) t = (a t, b t)
-
-exitInfer :: CallableDefT (Inferred s) -> Inferrer s (CallableDefT Ast.Type)
-exitInfer (Ast.ProcDef inTs outTs restrs ins outs body sr) = do
-  inTs' <- mapM (convertBack $ exitError sr) inTs
-  outTs' <- mapM (convertBack $ exitError sr) outTs
-  body' <- exitStatement body
-  return $ Ast.ProcDef inTs' outTs' restrs ins outs body' sr
-
-exitInfer (Ast.FuncDef inTs outT restrs ins out body sr) = do
-  inTs' <- mapM (convertBack $ exitError sr) inTs
-  outT' <- convertBack (exitError sr) outT
-  body' <- exitStatement body
-  return $ Ast.FuncDef inTs' outT' restrs ins out body' sr
-
-exitStatement :: StatementT (Inferred s) -> Inferrer s (StatementT Ast.Type)
-exitStatement (ProcCall s ins outs sr) =
-  ProcCall s <$> mapM exitExpression ins <*> mapM exitExpression outs <*> return sr
-exitStatement (Defer stmnt sr) =
-  flip Defer sr <$> exitStatement stmnt
-exitStatement (ShallowCopy exp1 exp2 sr) =
-  ShallowCopy <$> exitExpression exp1 <*> exitExpression exp2 <*> return sr
-exitStatement (If cond thenStmnt mElseStmnt sr) =
-  If <$> exitExpression cond <*> exitStatement thenStmnt <*> elseStmnt' <*> return sr
-  where elseStmnt' = maybe (return Nothing) (fmap Just . exitStatement) mElseStmnt
-exitStatement (While cond stmnt sr) =
-  While <$> exitExpression cond <*> exitStatement stmnt <*> return sr
-exitStatement (Scope stmnts sr) =
-  flip Scope sr <$> mapM exitStatement stmnts
-exitStatement (Terminator t sr) = return $ Terminator t sr
-exitStatement (VarInit m n t expr sr) =
-  VarInit m n <$> convertBack (exitError sr) t <*> exitExpression expr <*> return sr
-
-exitExpression :: ExpressionT (Inferred s) -> Inferrer s (ExpressionT Ast.Type)
-exitExpression (Bin op exp1 exp2 sr) =
-  Bin op <$> exitExpression exp1 <*> exitExpression exp2 <*> return sr
-exitExpression (Un op expr sr) =
-  Un op <$> exitExpression expr <*> return sr
-exitExpression (MemberAccess expr prop sr) =
-  MemberAccess <$> exitExpression expr <*> return prop <*> return sr
-exitExpression (Subscript exp1 brExprs sr) =
-  Subscript <$> exitExpression exp1 <*> mapM exitBracketExpr brExprs <*> return sr
-  where
-    exitBracketExpr (BracketExpr expr isr) = BracketExpr <$> exitExpression expr <*> return isr
-    exitBracketExpr (BracketExprOp op isr) = return $ BracketExprOp op isr
-exitExpression (Variable n sr) = return $ Variable n sr
-exitExpression (FuncCall n ins t sr) =
-  FuncCall n <$> mapM exitExpression ins <*> convertBack (exitError sr) t <*> return sr
-exitExpression (ExprLit lit sr) =
-  flip ExprLit sr <$> exitLiteral lit
-exitExpression (Zero t) =
-  Zero <$> convertBack errF t
-  where errF m = ErrorString $ "Could not deduce type of zero initialization: " ++ show m
-
-exitLiteral :: LiteralT (Inferred s) -> Inferrer s (LiteralT Ast.Type)
-exitLiteral (ILit i t sr) =
-  ILit i <$> convertBack (exitError sr) t <*> return sr
-exitLiteral (FLit f t sr) =
-  FLit f <$> convertBack (exitError sr) t <*> return sr
-exitLiteral (BLit b sr) = return $ BLit b sr
-exitLiteral (Null t sr) =
-  Null <$> convertBack (exitError sr) t <*> return sr
-exitLiteral (Undef t sr) =
-  Undef <$> convertBack (exitError sr) t <*> return sr
-
-exitError :: SourceRange -> UnifyErrorFunction
-exitError sr m = ErrorString $ "Error at " ++ show sr ++ " when finishing type inference: " ++ show m
-
-convertBack :: UnifyErrorFunction -> Inferred s -> Inferrer s Ast.Type
-convertBack errF inferred = case inferred of
-  Ref r -> readRef r >>= \tvar -> case tvar of
-    b@(Unbound _ Changeable) -> do
-      addError . errF $ "A changeable unbound type variable cannot remain after typechecking: " ++ show b
-      return Ast.UnknownT
-    Unbound _ (Unchangeable n) -> return $ Ast.NamedT n []
-    Link inf -> convertBack errF inf
-  NewType n its _ _ -> Ast.NamedT n <$> mapM (convertBack errF) its
-  Alias n its _ -> Ast.NamedT n <$> mapM (convertBack errF) its
-  PointerT it -> Ast.PointerT <$> convertBack errF it
-  StructT ps -> Ast.StructT <$> mapM propConvert ps
-    where propConvert (n, it) = (n, ) <$> convertBack errF it
-  -- (FunctionT its ots, _) -> Ast.Function <$> mapM (convertBack errF) its <*> mapM (convertBack errF) its -- TODO: re-add when adding function types
-  _ -> return $ case inferred of
-    BoolT -> Ast.BoolT
-    IntT s -> Ast.IntT s; UIntT s -> Ast.UIntT s; FloatT s -> Ast.FloatT s
-
-unifyExternalFunction :: SignatureT (Inferred s) -> SourceRange -> Inferrer s ()
-unifyExternalFunction sig sr = do
-  mFunc <- use $ functions . at (sigName sig)
-  case (mFunc, sig) of
-    (Nothing, _) -> addError . ErrorString $ "Unknown function " ++ sigName sig ++ " at " ++ show sr
-    (Just (Ast.ProcDef funcInTs funcOutTs restrs _ _ _ _), ProcSig _ inTs outTs) ->
-      unifyWork restrs funcInTs funcOutTs inTs outTs
-    (Just (Ast.FuncDef funcInTs funcOutT restrs _ _ _ _), FuncSig _ inTs outT) ->
-      unifyWork restrs funcInTs [funcOutT] inTs [outT]
-    _ -> addError . ErrorString $ "Callable type mismatch, you're using a function as a procedure or vice-versa (at " ++ show sr ++ ")"
-  where
-    sigName (ProcSig n _ _) = n
-    sigName (FuncSig n _ _) = n
-    errF inOut num m = ErrorString $ "Type mismatch in function " ++ inOut ++ " argument number " ++ show num ++  " at " ++ show sr ++ ": " ++ show m
-    unifyArguments inOut ts' ts = sequence_ . getZipList $ unify <$> ZipList (errF inOut <$> [(1 :: Int)..]) <*> ZipList ts' <*> ZipList ts
-    unifyWork restrs funcInTs funcOutTs inTs outTs = do
-      ProcT funcInTs' funcOutTs' <- convertProcSig restrs funcInTs funcOutTs Unbounds
-      when (length funcInTs /= length inTs) . addError . ErrorString $ "Wrong number of in arguments at " ++ show sr
-      when (length funcOutTs /= length outTs) . addError . ErrorString $ "Wrong number of out arguments at " ++ show sr
-      unifyArguments "in" funcInTs' inTs
-      unifyArguments "out" funcOutTs' outTs
-
--- BUG: if a previously unbound with a restriction with a []-expression is unified with a newtype and that []-expression fits in such a way that a default is used, and that default needs type inference to get a fully specified type (for example 0) codegen will die with a type error despite inference succeeding
-unify :: UnifyErrorFunction -> Inferred s -> Inferred s -> Inferrer s (Inferred s)
-unify errF t1 t2 = return t1 <* (considerEqual t1 t2 >>= flip unless innerUnify)
-  where
+    uni = unify errF
     linkCompression :: TVarRef s -> TVar s -> Inferrer s (TVarRef s)
-    linkCompression uncompressedR (Link (Ref nextR)) = do
+    linkCompression uncompressedR (Link (IRef nextR)) = do
       r <- readRef nextR >>= linkCompression nextR
-      writeRef uncompressedR . Link $ Ref r
+      writeRef uncompressedR . Link $ IRef r
       return r
     linkCompression r _ = return r
-    unifyRef t r = readRef r >>= \tvar -> case tvar of
-      Unbound _ (Unchangeable name) -> addError . errF $ "Unable to unify typevariable " ++ name ++ " with concrete type " ++ show t
-      Unbound restr Changeable -> do
-        applyRestriction errF t restr
-        writeRef r $ Link t
-      Link t' -> void $ unify errF t t'
-    innerUnify = case (t1, t2) of
-      (Ref uncompressedR1, Ref uncompressedR2) -> do
-        r1 <- readRef uncompressedR1 >>= linkCompression uncompressedR1
-        r2 <- readRef uncompressedR2 >>= linkCompression uncompressedR2
-        unless (r1 == r2) $ do
-          pair <- (,) <$> readRef r1 <*> readRef r2
-          case pair of
-            (Unbound _ (Unchangeable n1), Unbound _ (Unchangeable n2)) -> addError . errF $ "Cannot unify differing typevariables " ++ n1 ++ " and " ++ n2
-            (Unbound restr Changeable, Unbound _ _) -> applyRestriction errF (Ref r2) restr >> writeRef r1 (Link $ Ref r2)
-            (Unbound _ _, Unbound restr Changeable) -> applyRestriction errF (Ref r1) restr >> writeRef r2 (Link $ Ref r1)
-            (_, Link t) -> unifyRef t r1
-            (Link t, _) -> unifyRef t r2
-      (Ref r, t) -> readRef r >>= linkCompression r >>= unifyRef t
-      (t, Ref r) -> readRef r >>= linkCompression r >>= unifyRef t
-      (NewType n1 t1s _ _, NewType n2 t2s _ _) | n1 == n2 -> zipWithM_ (unify errF) t1s t2s
-      (Alias n1 t1s _, Alias n2 t2s _) | n1 == n2 -> zipWithM_ (unify errF) t1s t2s
-      (PointerT i1, PointerT i2) -> void $ unify errF i1 i2
-      (StructT p1, StructT p2) | p1names == p2names -> zipWithM_ (unify errF) p1types p2types
-        where
-          (p1names, p1types) = unzip p1
-          (p2names, p2types) = unzip p2
-      (ProcT i1 o1, ProcT i2 o2) | length i1 == length i2 && length o1 == length o2 -> do
-        zipWithM_ (unify errF) i1 i2
-        zipWithM_ (unify errF) o1 o2
-      (FunctionT i1 o1, FunctionT i2 o2) | length i1 == length i2 -> do
-        zipWithM_ (unify errF) i1 i2
-        void $ unify errF o1 o2
-      _ -> addError . errF $ "Incompatible types (" ++ show t1 ++ " != " ++ show t2 ++ ")"
+    unifyRef t r = readRef r >>= \case
+      Unbound restr -> writeRef r (Link t) >> applyRestriction errF t restr
+      Link t' -> uni t t'
+    equalOr m = unless (t1 == t2) $ do
+      partitions <- use equals
+      let aClass = fromMaybe (S.singleton t1) $ F.find (S.member t1) partitions
+          bClass = fromMaybe (S.singleton t2) $ F.find (S.member t2) partitions
+          others = partitions S.\\ S.fromList [aClass, bClass]
+      when (aClass /= bClass) $ do
+        equals .= (S.singleton (S.union aClass bClass) `S.union` others)
+        m
 
-considerEqual :: Inferred s -> Inferred s -> Inferrer s Bool
-considerEqual a b
-  | a == b = return True
-  | otherwise = do
-    partitions <- use equals
-    let aClass = fromMaybe [a] $ List.find (elem a) partitions
-        bClass = fromMaybe [b] $ List.find (elem b) partitions
-        others = partitions List.\\ [aClass, bClass]
-    when (aClass == bClass) $ equals .= (List.union aClass bClass : others)
-    return $ aClass == bClass
+restrict :: ErrF -> Inferred s -> IRestriction s -> Inferrer s (Inferred s)
+restrict errF t restr = applyRestriction errF t restr >> return t
 
-restrict :: UnifyErrorFunction -> Restriction s -> Inferred s -> Inferrer s (Inferred s)
-restrict errF restr inferred = return inferred <* applyRestriction errF inferred restr
+applyRestriction :: ErrF -> Inferred s -> IRestriction s -> Inferrer s ()
 
--- TODO: applyRestriction for newtypes
-applyRestriction :: UnifyErrorFunction -> Inferred s -> Restriction s -> Inferrer s ()
 applyRestriction _ _ NoRestriction = return ()
-applyRestriction errF (Alias _ _ t) restr = applyRestriction errF t restr
 
-applyRestriction errF t@(Ref r) restr = readRef r >>= \tvar -> case tvar of
-  Link inf -> applyRestriction errF inf restr
-  Unbound NoRestriction Changeable -> writeRef r $ Unbound restr Changeable
-  Unbound restr' (Unchangeable _) | restr == restr' -> return ()
-  u@(Unbound (NumR spec) changeable) -> case restr of
+applyRestriction errF INewType{} (PropertiesR expands) =
+  mapM_ (attemptCompoundExpand errF) expands
+
+applyRestriction errF t@(IRef r) restr = readRef r >>= \case
+  Link i -> applyRestriction errF i restr
+  Unbound restr' | restr == restr' -> return ()
+  Unbound NoRestriction -> writeRef r $ Unbound restr
+  u@(Unbound (NumR spec)) -> case restr of
     NumR NoSpec -> return ()
     NumR spec' | spec == spec' -> return ()
-    NumR spec' | spec == NoSpec -> if changeable == Changeable
-      then writeRef r $ Unbound (NumR spec') Changeable
-      else addError . errF $ "Could not apply restriction " ++ show restr ++ " on type " ++ show t ++ " (" ++ show u ++ ")"
-    _ -> addError . errF $ "Could not apply restriction " ++ show restr ++ " on type " ++ show t ++ " (" ++ show u ++ ")"
-  u@(Unbound (PropertiesR origPs origBrackets) changeable) -> case restr of
-    PropertiesR restrPs restrBrackets -> do
-      newPs <- mapM check $ mergeTraversalBy (compare `on` fst) origPs restrPs
-      when (changeable == Changeable) . writeRef r $ Unbound (PropertiesR newPs $ restrBrackets ++ origBrackets) changeable
-    _ -> addError . errF $ "Could not apply restriction " ++ show restr ++ " on type " ++ show t ++ " (" ++ show u ++ ")"
-    where
-      check item = case item of
-        LeftL i -> return i
-        BothE (opName, op) (_, rp) -> (opName,) <$> unify errF op rp
-        RightL i@(rpName, _) -> do
-          unless (changeable == Changeable) . addError . errF $ "Cannot change unchangeable type value, we require " ++ show u ++ " to have a property " ++ rpName ++ " but it does not"
-          return i
-  u -> addError . errF $ "Could not apply restriction " ++ show restr ++ " on type " ++ show t ++ " (" ++ show u ++ ")"
+    NumR _ | spec == NoSpec -> writeRef r $ Unbound restr
+    _ -> throwError . errF $ "Could not apply restriction " ++ show restr ++ " on type " ++ show t ++ " (" ++ show u ++ ")"
+  u@(Unbound (PropertiesR origExpands)) -> case restr of
+    PropertiesR restrExpands ->
+      writeRef r . Unbound . PropertiesR . List.nub $ origExpands ++ restrExpands
+    _ -> throwError . errF $ "Could not apply restriction " ++ show restr ++ " on type " ++ show t ++ " (" ++ show u ++ ")"
+  u -> throwError . errF $ "Could not apply restriction " ++ show restr ++ " on type " ++ show t ++ " (" ++ show u ++ ")"
 
-applyRestriction _ (UIntT _) UIntR = return ()
+applyRestriction _ IUInt{} UIntR = return ()
 
-applyRestriction _ (IntT _) (NumR spec)
-  | spec == NoSpec = return ()
-  | spec == IntSpec = return ()
-applyRestriction _ (FloatT _) (NumR spec)
-  | spec == NoSpec = return ()
-  | spec == FloatSpec = return ()
+applyRestriction _ IInt{} (NumR spec)
+  | spec `elem` [NoSpec, IntSpec] = return ()
+applyRestriction _ IFloat{} (NumR spec)
+  | spec `elem` [NoSpec, FloatSpec] = return ()
 
-applyRestriction errF (PointerT t) (PropertiesR ps brackets) = do
-  case mapM exprOnly brackets of
-    Just restrictInts -> sequence_ restrictInts
-    Nothing -> addError . errF $ "A pointer only supports [int]"
-  applyRestriction errF t $ PropertiesR ps []
+applyRestriction errF IPointer{} (PropertiesR expands) =
+  mapM_ (attemptCompoundExpand errF) expands
+
+applyRestriction errF IStruct{} (PropertiesR expands) =
+  mapM_ (attemptCompoundExpand errF) expands
+
+applyRestriction errF t restr = throwError . errF $ "Could not apply restriction " ++ show restr ++ " on type " ++ show t
+
+class Ref r where
+  readRef :: (MonadTrans m1, Monad (m1 (ST s)), MonadTrans m2) => r s a -> m2 (m1 (ST s)) a
+  writeRef :: (MonadTrans m1, Monad (m1 (ST s)), MonadTrans m2) => r s a -> a -> m2 (m1 (ST s)) ()
+
+instance Ref TVarRefT where
+  readRef (TVarRef _ r) = lift . lift $ readSTRef r
+  writeRef (TVarRef _ r) = lift . lift . writeSTRef r
+instance Ref STRef where
+  readRef = lift . lift . readSTRef
+  writeRef r = lift . lift . writeSTRef r
+
+withTypeVars :: P.Type -> [String] -> Inferrer s a -> Inferrer s ([Inferred s], a)
+withTypeVars (P.NamedT n ts r) ps i = do
+  when (length ps /= length ts) $ do
+    let errS = "Incorrect usage of named type " ++ n ++ " at " ++ show r ++ ": " ++
+               "wrong number of type arguments, got " ++ show (length ts) ++ ", wanted"
+               ++ show (length ps)
+    throwError $ ErrorString errS
+  ts' <- mapM enter ts
+  prevTypeVars <- typeVars <<%= M.union (M.fromList $ zip ps ts')
+  a <- i
+  typeVars .= prevTypeVars
+  return (ts', a)
+withTypeVars t _ _ = error $ "(Compiler error): Incorrect usage of withTypeVars, " ++ show t ++ " should be a NamedT"
+
+pairA :: Applicative f => (a -> f c) -> (b -> f d) -> (a, b) -> f (c, d)
+pairA af bf (a, b) = (,) <$> af a <*> bf b
+
+justErr :: MonadError e m => e -> Maybe a -> m a
+justErr _ (Just a) = return a
+justErr err Nothing = throwError err
+
+fromRight :: Either a b -> b
+fromRight (Right b) = b
+
+unifyUnion :: ErrF -> M.Map String (Inferred s) -> M.Map String (Inferred s) -> Inferrer s (M.Map String (Inferred s))
+unifyUnion errF = unionWithM (\a b -> unify errF a b >> return a)
+
+-- NOTE: stolen from hydrogen package source (with minor change)
+unionWithM :: (Ord k, Monad m) => (a -> a -> m a) -> M.Map k a -> M.Map k a -> m (M.Map k a)
+unionWithM f a b =
+  liftM M.fromAscList
+    . sequence
+    . fmap (\(k, v) -> liftM (k,) v)
+    . M.toAscList
+    $ M.unionWith f' (M.map return a) (M.map return b)
   where
-    exprOnly :: ([Either a b], Inferred s) -> Maybe (Inferrer s ())
-    exprOnly ([Right _], it) = Just $ applyRestriction errF it (NumR IntSpec)
-    exprOnly _ = Nothing
+    f' mx my = mx >>= \x -> my >>= \y -> f x y
 
-applyRestriction errF t@(StructT origPs) (PropertiesR restrPs []) = mapM_ check $ mergeTraversalBy (compare `on` fst) origPs restrPs
-  where
-    check item = case item of
-      LeftL _ -> return ()
-      BothE (_, op) (_, rp) -> void $ unify errF op rp
-      RightL (rpName, _) -> addError . errF $ "Unsatisfied property requirement: " ++ show t ++ " lacks property " ++ rpName
-
-applyRestriction errF t restr = addError . errF $ "Could not apply restriction " ++ show restr ++ " on type " ++ show t
-
-accessProperty :: UnifyErrorFunction -> String -> Inferred s -> Inferrer s (Inferred s)
-accessProperty errF member inferred = case inferred of
-  Alias _ _ t -> accessProperty errF member t
-  PointerT inf -> accessProperty errF member inf
-  StructT ps -> case lookup member ps of
-    Just prop -> return prop
-    Nothing -> errorReturn . errF $ "Struct lacks a property with the name " ++ member
-  Ref r -> readRef r >>= \tvar -> case tvar of
-    Link inf -> accessProperty errF member inf
-    Unbound NoRestriction Changeable -> do
-      innerInferred <- newUnbound NoRestriction
-      writeRef r $ Unbound (PropertiesR [(member, innerInferred)] []) Changeable
-      return innerInferred
-    Unbound (PropertiesR ps _) _ -> case lookup member ps of
-      Just prop -> return prop
-      Nothing -> do
-        innerInferred <- newUnbound NoRestriction
-        applyRestriction errF inferred $ PropertiesR [(member, innerInferred)] []
-        return innerInferred
-    u -> errorReturn . errF $ show u ++ " cannot have a property " ++ member
-  NewType n _ t (Replacements repPs _) -> case M.lookup member repPs of
-    Nothing -> errorReturn . errF $ "Type " ++ n ++ " does not have a property " ++ member
-    Just (_, expr) -> do
-      prevVariables <- variables <<%= M.union (M.fromList names)
-      variables . at "self" ?= t
-      resultType <- snd <$> enterExpression expr
-      variables .= prevVariables
-      return resultType
-    where
-      names = case t of
-        StructT ps -> ps
-        _ -> []
-  t -> errorReturn . errF $ "Type " ++ show t ++ " cannot have a property"
-
-accessBracket :: UnifyErrorFunction -> Inferred s -> [(BracketExprT (Inferred s), Inferred s)] -> Inferrer s ([BracketExprT (Inferred s)], Inferred s)
-accessBracket errF t pat = case t of
-  Alias _ _ it -> accessBracket errF it pat
-  PointerT it -> case pat of
-    [(BracketExpr _ _, exprT)] -> applyRestriction errF exprT (NumR IntSpec) >> return (fst <$> pat, it)
-    _ -> do
-      addError . errF $ show t ++ " only supports [int]"
-      (fst <$> pat,) <$> newUnbound NoRestriction
-  Ref r -> readRef r >>= \tvar -> case tvar of
-    Link it -> accessBracket errF it pat
-    Unbound NoRestriction Changeable -> do
-      innerInferred <- newUnbound NoRestriction
-      writeRef r $ Unbound (PropertiesR [] [(toRestr <$> pat, innerInferred)]) Changeable
-      return (fst <$> pat, innerInferred)
-    where
-      toRestr (BracketExpr _ _, resultT) = Right resultT
-      toRestr (BracketExprOp op _, _) = Left op
-  NewType _ _ it (Replacements _ pats) -> case foldl mplus Nothing . map (patternMatch pat) $ pats of
-    Nothing -> do
-      addError . errF $ show t ++ " has no matching []-pattern"
-      (fst <$> pat,) <$> newUnbound NoRestriction
-    Just runPattern -> do
-      prevVariables <- variables <<%= M.union (M.fromList names)
-      variables . at "self" ?= it
-      runPattern <* (variables .= prevVariables)
-    where
-      names = case it of
-        StructT ps -> ps
-        _ -> []
-      patternMatch supplied (pattern, (_, expr)) = (\cont -> (,) <$> cont <*> (snd <$> enterExpression expr)) <$> recurse supplied pattern
-      recurse :: [(BracketExprT (Inferred s), Inferred s)] -> [BracketToken] -> Maybe (Inferrer s [BracketExprT (Inferred s)])
-      recurse [] [] = Just $ return []
-      recurse (brExpr@(BracketExpr _ _, supT):supplied) (BracketIdentifier ident _:pattern) = (\cont -> do
-        variables . at ident ?= supT
-        (fst brExpr :) <$> cont) <$> recurse supplied pattern
-      recurse supplied (BracketIdentifier ident (Just expr):pattern) = (\cont -> do
-        (expr', exprT) <- enterExpression expr
-        variables . at ident ?= exprT
-        (BracketExpr expr' nowhere :) <$> cont) <$> recurse supplied pattern
-      recurse (brExpr@(BracketExprOp supOp _, _):supplied) (BracketOperator op:pattern)
-        | supOp == op = fmap (fst brExpr :) <$> recurse supplied pattern
-        | otherwise = Nothing
-      recurse _ _ = Nothing
-
-makePointer :: UnifyErrorFunction -> Inferred s -> Inferrer s (Inferred s)
-makePointer errF inferred = case inferred of
-  PointerT innerTref -> return innerTref
-  Ref r -> readRef r >>= \tvar -> case tvar of
-    Link inf -> makePointer errF inf
-    Unbound NoRestriction Changeable -> do
-      innerInferred <- newUnbound NoRestriction
-      writeRef r . Link $ PointerT innerInferred
-      return innerInferred
-    Unbound restr@PropertiesR{} Changeable -> do
-      innerInferred <- newUnbound NoRestriction
-      applyRestriction errF (PointerT innerInferred) restr
-      writeRef r . Link $ PointerT innerInferred
-      return innerInferred
-    u -> errorReturn . errF $ show u ++ " cannot be a pointer"
-  t -> errorReturn . errF $ "Type " ++ show t ++ " does not unify with a pointer"
-
-makeBool :: UnifyErrorFunction -> Inferred s -> Inferrer s ()
-makeBool errF inferred = case inferred of
-  BoolT -> return ()
-  Ref r -> readRef r >>= \tvar -> case tvar of
-    Link inf -> makeBool errF inf
-    Unbound NoRestriction Changeable -> void . writeRef r $ Link BoolT
-    u -> addError . errF $ show u ++ " cannot be a bool"
-  t -> addError . errF $ "Type " ++ show t ++ " does not unify with a bool"
-
-convert :: Ast.Type -> Inferrer s (Inferred s)
-convert t = case t of
-  Ast.NamedT n@(c:_) [] | isLower c -> use (typeVariables . at n) >>= \mT -> case mT of
-    Just tref -> return tref
-    Nothing -> errorReturn . ErrorString $ "Unknown typevariable '" ++ n ++ "'" -- FIXME: This error will also occur in functions calling incorrectly specified functions, not very helpful
-  _ -> case t of
-    Ast.NamedT n@(c:_) its | isUpper c -> use (typeDefs . at n) >>= \mDef -> case mDef of
-      Just (Ast.Alias params origT _) | length params == length its ->
-        constructNamedT Alias params origT
-      Just (Ast.NewType params reps origT _) | length params == length its ->
-        constructNamedT NewType params origT <*> return reps
-      Just (Ast.Alias params _ _) -> errF params
-      Just (Ast.NewType params _ _ _) -> errF params
-      Nothing -> errorReturn . ErrorString $ "Unknown named type '" ++ n ++ "'"
-      where
-        constructNamedT f params origT = do
-          its' <- mapM convert its
-          prevTypeVars <- typeVariables <<%= M.union (M.fromList $ zip params its')
-          origT' <- convert origT
-          typeVariables .= prevTypeVars
-          return $ f n its' origT'
-        errF params = errorReturn . ErrorString $ "Incorrect instantiation of type '" ++ n ++ "', wrong number of parameters (" ++ show (length its) ++ " != " ++ show (length params) ++ ")"
-    Ast.PointerT it -> PointerT <$> convert it
-    Ast.StructT props -> StructT <$> mapM propConvert props
-    Ast.UnknownT -> newUnbound NoRestriction
-    _ -> simpleConvert
-  where
-    propConvert (n, it) = (n, ) <$> convert it
-    simpleConvert = return $ case t of
-      Ast.IntT s -> IntT s
-      Ast.UIntT s -> UIntT s
-      Ast.FloatT s -> FloatT s
-      Ast.BoolT -> BoolT
-
-convertProcSig :: [(String, Ast.Restriction)] -> [Ast.Type] -> [Ast.Type] -> TypeVarTarget -> Inferrer s (Inferred s)
-convertProcSig restrs inTs outTs target = do
-  prevTypeVars <- typeVariables <<.= M.empty
-  defineTypeVars
-  inTs' <- mapM convert inTs
-  outTs' <- mapM convert outTs
-
-  forM_ restrs $ \(n, restr) -> use (typeVariables . at n) >>= \mT -> case mT of
-    Nothing -> addError . ErrorString $ "(Incorrect funcsig) Restriction " ++ show restr ++ " applied on unknown type variable " ++ n
-    Just tref -> convertRestriction restr >>= \restr' -> forceRestrict errF restr' tref
-      where errF m = ErrorString $ "(Incorrect funcsig) Could not apply restriction " ++ show restr ++ " to type variable " ++ n ++ ". " ++ show m
-
-  case target of
-    Environment -> typeVariables %= M.union prevTypeVars
-    Unbounds -> typeVariables .= prevTypeVars
-
-  return $ ProcT inTs' outTs'
-  where
-    forceRestrict errF restr inferred@(Ref r) = do
-      oldChangeable <- setChangeable r Changeable
-      applyRestriction errF inferred restr
-      void $ setChangeable r oldChangeable
-    setChangeable r c = do
-      Unbound restr c' <- readRef r
-      writeRef r $ Unbound restr c
-      return c'
-    defineTypeVars = mapM_ defineTypeVar typeVarNames
-    defineTypeVar n = newTypeVar n target >>= (typeVariables . at n ?=)
-    typeVarNames = S.toList . S.fromList $ [n | Ast.NamedT n@(c:_) [] <- inTs ++ outTs >>= universe, isLower c] ++ map fst restrs
-
-convertRestriction :: Ast.Restriction -> Inferrer s (Restriction s)
-convertRestriction NoRestriction = return NoRestriction
-convertRestriction UIntR = return UIntR
-convertRestriction (NumR s) = return $ NumR s
-convertRestriction (PropertiesR ps brackets) = PropertiesR <$> mapM propConvert ps <*> mapM bracketConvert brackets
-  where
-    propConvert (n, p) = (n, ) <$> convert p
-    bracketConvert (tokens, t) = (,) <$> mapM (extractMonad . fmap convert) tokens <*> convert t
-    extractMonad (Right a) = Right <$> a
-    extractMonad (Left a) = return $ Left a
-
-newUnbound :: Restriction s -> Inferrer s (Inferred s)
-newUnbound restr = lift . fmap Ref . newSTRef $ Unbound restr Changeable
-
-newTypeVar :: String -> TypeVarTarget -> Inferrer s (Inferred s)
-newTypeVar n Environment = lift . fmap Ref . newSTRef $ Unbound NoRestriction (Unchangeable n)
-newTypeVar _ Unbounds = lift . fmap Ref . newSTRef $ Unbound NoRestriction Changeable
-
-writeRef :: TVarRef s -> TVar s -> Inferrer s ()
-writeRef r = lift . writeSTRef r
-
-readRef :: TVarRef s -> Inferrer s (TVar s)
-readRef = lift . readSTRef
-
-addError :: ErrorMessage -> Inferrer s ()
-addError err = errors %= (err :)
-
-errorReturn :: ErrorMessage -> Inferrer s (Inferred s)
-errorReturn = (>> newUnbound NoRestriction) . addError
-
-data MergeTraversal a = LeftL a | BothE a a | RightL a
-mergeTraversalBy :: (a -> a -> Ordering) -> [a] -> [a] -> [MergeTraversal a]
-mergeTraversalBy _ [] rs = map RightL rs
-mergeTraversalBy _ ls [] = map LeftL ls
-mergeTraversalBy f origL@(l:ls) origR@(r:rs) = case f l r of
-  LT -> LeftL l : mergeTraversalBy f ls origR
-  EQ -> BothE l r : mergeTraversalBy f ls rs
-  GT -> RightL r : mergeTraversalBy f origL rs
+{-
+Three stage inference:
+1. enter: convert to Inferred, ICompoundAccess and InferredSource, store unexpanded newtype replacements
+2. expand: try to iteratively expand all unexpanded newtype replacements until fixpoint. If fixpoint has remaining unexpanded things, error out.
+3. exit: convert to FlatType and CompoundAccess, generate new types (TypeKey) basically everywhere to keep all types non-cyclic (use a M.Map FlatType TypeKey inside a new monad with state and except)
+-}
