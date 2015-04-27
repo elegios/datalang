@@ -11,7 +11,8 @@ import Ast (SourceRange(..), location)
 import Parser hiding (parseFile)
 import Data.Functor ((<$>))
 import Data.List ((\\))
-import Control.Lens hiding (both)
+import Data.Generics.Uniplate.Direct (universe)
+import Control.Lens hiding (both, universe)
 import Control.Applicative ((<*>))
 import Control.Monad (zipWithM_)
 import Control.Monad.State (evalStateT, StateT, get, put)
@@ -203,12 +204,33 @@ checkTypeDefs tds = dupErrs ++ recurse (typeGraph tds)
       where
         err = ErrorString $ "Redefinition of " ++ typeName d ++ " at " ++ show (location d)
 
+-- BUG: should check for cycles separately between aliases and newtypes
+{-
+an alias should depend on all mentioned aliases
+a newtype should depend on newtypes in a top-level struct, the type under a chain of top-level pointers, the top-level type and all newtypes occurring as type parameters to newtypes in those positions
+I at least think that is correct
+Examples:
+
+alias A B // deps []
+type B A  // deps [B]
+
+alias Pair<a,b> { first : a, second : b } // deps []
+type LL<a> Pair<a,^LL<a>>                 // deps []
+
+alias Pair<a,b> { first : a, second : ^b } // deps []
+type LL<a> Pair<a,LL<a>>                   // deps []
+
+alias A {a : Bool, b : B} // deps []
+type B ^A                 // deps []
+-}
 typeGraph :: [TypeDefT String] -> [((String, SourceRange), (String, SourceRange))]
-typeGraph defs = defs >>= \d -> zip (repeat (typeName d, location d)) $ deps (wrappedType d)
+typeGraph defs = defs >>= \d -> zip (repeat (typeName d, location d)) $ deps d
   where
-    deps (PointerT t _) = deps t
-    deps t = innerDeps t
-    innerDeps (NamedT tName ts r) = (tName, r) : concatMap deps ts -- BUG: might be too strong, not sure what to do instead though
+    deps Alias{wrappedType = w} = [ (n, r) | NamedT n _ r <- universe w ]
+    deps NewType{wrappedType = w} = newDeps w
+    newDeps (PointerT t _) = newDeps t
+    newDeps t = innerDeps t
+    innerDeps (NamedT tName ts r) = (tName, r) : concatMap newDeps ts -- BUG: might be too strong, not sure what to do instead though
     innerDeps (StructT ps _) = concatMap innerDeps $ snd <$> ps
     innerDeps _ = []
 
