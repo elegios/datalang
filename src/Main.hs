@@ -1,7 +1,10 @@
 module Main where
 
-import Parser (parseFile)
-import NameResolution (resolveNames)
+import Ast (TSize(S32), nowhere)
+import Parser (parseFile, Type(FuncT, IntT))
+import NameResolution (resolveNames, Resolved(Global))
+import Inference (infer)
+import Data.Functor ((<$>))
 import System.Environment (getArgs)
 import qualified LLVM.General.AST as AST
 import qualified LLVM.General.Module as M
@@ -16,7 +19,10 @@ main = do
   putStrLn "Parse done"
   resolved <- either (fail . show) return $ resolveNames source
   putStrLn "Name resolution done"
-  return resolved
+  let inferred = infer resolved [(Global "main", FuncT [] (IntT S32 nowhere) nowhere)]
+  print $ fmap (const True) <$> inferred
+  putStrLn "Inference done"
+  return inferred
 -- main = do
 --   sourceFile : _ <- getArgs
 --   source <- parseFile sourceFile >>= either (fail . show) return
@@ -62,3 +68,7 @@ asGeneralModule mod monad = do
   case res of
     Left mess -> fail mess
     Right res -> return res
+
+isRight :: Either a b -> Bool
+isRight Right{} = True
+isRight _ = False

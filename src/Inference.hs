@@ -3,7 +3,7 @@
 module Inference (infer) where
 
 import Ast (SourceRange(..), TSize(..), BinOp(..), UnOp(..), TerminatorType(..), NumSpec(..), location, Source)
-import NameResolution (Resolved(..))
+import NameResolution (Resolved(..), ResolvedSource(..))
 import Parser (HiddenIdentifiers)
 import Data.Maybe (fromJust, isJust)
 import Data.Functor ((<$>))
@@ -101,7 +101,7 @@ data IRestriction s = NoRestriction
 instance Show (ICompoundAccess s) where
   show _ = "compoundaccess"
 
-newtype TypeKey = TypeKey { representation :: Int } deriving (Eq, Ord)
+newtype TypeKey = TypeKey { representation :: Int } deriving (Eq, Ord, Show)
 
 data FlatType = IntT TSize
               | UIntT TSize
@@ -113,7 +113,7 @@ data FlatType = IntT TSize
               | StructT [(String, TypeKey)]
               | FuncT [TypeKey] TypeKey
               | ProcT [TypeKey] [TypeKey]
-              deriving (Eq, Ord)
+              deriving (Show, Eq, Ord)
 
 data Replacements s = Replacements
                      HiddenIdentifiers
@@ -163,16 +163,18 @@ data InferrerState s = InferrerState
                        , _typeVars :: M.Map String (Inferred s)
                        , _locals :: M.Map Resolved (Inferred s)
                        , _enteredNames :: M.Map P.Type (Inferred s)
-                       , _unexpandedCompounds :: [ICompoundAccess s]
                        , _replacementContext :: Inferred s
                        , _requestedGlobals :: [(Resolved, Inferred s)]
                        , _refId :: Int
+                       , _defineTypeVars :: Bool
+                       , _toInferredMap :: M.Map TypeKey (Inferred s)
                        }
 data FinalizerState s = FinalizerState
                         { _flatTypes :: M.Map TypeKey FlatType
                         , _typeKeys :: M.Map FlatType TypeKey
                         , _newTypes :: M.Map (String, [TypeKey]) TypeKey
                         , _nextTypeKey :: TypeKey
+                        , _toInferred :: M.Map TypeKey (Inferred s)
                         }
 data SuperState s = SuperState
                     { _done :: S.Set (IRequest s)
@@ -183,21 +185,24 @@ type ErrF = String -> ErrorMessage
 instance Show (Replacements s) where
   show (Replacements hi ai ps) = "Replacements " ++ show hi ++ " " ++ show (M.keys ai) ++ " " ++ show (fst <$> ps)
 
-type IRequest s = Request (Inferred s)
+type IRequest s = Request TypeKey
 type Request t = (Resolved, t)
 
 makeLenses ''InferrerState
 makeLenses ''FinalizerState
 makeLenses ''SuperState
 
-infer :: P.SourceFileT Resolved -> [Request P.Type] -> [Either ErrorMessage (CallableDef, M.Map TypeKey FlatType)]
-infer (P.SourceFile tDefs cDefs) requests = runST $
-  runExceptT (runStateT (mapM convertRequest requests) basicInferrerState) >>= \case
+infer :: ResolvedSource -> [Request P.Type] -> [Either ErrorMessage (CallableDef, M.Map TypeKey FlatType)]
+infer (ResolvedSource tDefs cDefs) requests = runST $ flip evalStateT initSuperState $
+  runInferrer 0 M.empty (mapM convReq requests) >>= \case
     Left e -> return [Left e]
-    Right (rs, st) -> flip evalStateT initSuperState $
-      inferRequest (_refId st) initFinalizerState ((:[]) <$> mapWith id rs)
+    Right (rs, st) -> runFinalizer initFinalizerState (mapM convReq' rs) >>= \case
+      Left e -> return [Left e]
+      Right (rs', finSt) -> inferRequest (_refId st) finSt ((:[]) <$> mapWith id rs')
   where
-    convertRequest (n, t) = (n,) <$> enter t
+    convReq (n, t) = (n,) <$> enter t
+    convReq' (n, t) = (n,) <$> convertType fullyReifiedError t
+    fullyReifiedError m = ErrorString $ "All requested types must be fully reified: " ++ m
     initSuperState = SuperState
       { _done = S.empty
       }
@@ -206,51 +211,58 @@ infer (P.SourceFile tDefs cDefs) requests = runST $
       , _typeKeys = M.empty
       , _newTypes = M.empty
       , _nextTypeKey = TypeKey 0
+      , _toInferred = M.empty
       }
     basicInferrerState = InferrerState
-      { _typeDefs = mapWith P.typeName tDefs
-      , _callableDefs = callables
+      { _typeDefs = tDefs
+      , _callableDefs = cDefs
       , _typeVars = M.empty
       , _locals = M.empty
       , _enteredNames = M.empty
-      , _unexpandedCompounds = []
       , _replacementContext = error "Compiler error: not in a replacement context, yet tried to use one"
       , _requestedGlobals = []
       , _refId = 0
+      , _defineTypeVars = False
+      , _toInferredMap = M.empty
       }
-    callables = mapWith P.callableName cDefs
-    runInferrer rid = lift . runExceptT . flip runStateT (basicInferrerState {_refId = rid})
+    runInferrer rid infmap = lift . runExceptT . flip runStateT (basicInferrerState {_refId = rid, _toInferredMap = infmap})
     runFinalizer st = lift . runExceptT . flip runStateT st
     inferRequest :: Int -> FinalizerState s -> M.Map (IRequest s) [IRequest s] -> Super s [Either ErrorMessage (CallableDef, M.Map TypeKey FlatType)]
-    -- inferRequest _ todo | M.null todo = return []
-    inferRequest rid finSt todo = (done %= S.insert req) >> case M.lookup fn callables of
-      Nothing -> error $ "Compiler error: could not find callable " ++ fn
-      Just def -> runInferrer rid (enterDef def t) >>= \case
+    inferRequest _ _ todo | M.null todo = return []
+    inferRequest rid finSt todo = (done %= S.insert req) >> case trace ("requested " ++ show req) $ M.lookup fn cDefs of
+      Nothing -> error $ "Compiler error: could not find callable " ++ fn -- TODO: pass toInferred to InferrerState
+      Just def -> runInferrer rid infmap (enter t >>= enterDef def) >>= \case
         Left e -> (Left e:) <$> inferRequest rid finSt rest
-        Right (def', st) -> runFinalizer finSt (exit def') >>= \case
+        Right (def', st) -> runFinalizer finSt exiter >>= \case
           Left e -> (Left e:) <$> inferRequest rid finSt rest
-          Right (def'', finSt') -> do
-            let next = rest `M.union` ((:path) <$> mapWith id (_requestedGlobals st))
+          Right ((def'', reqs), finSt') -> do
+            removeDone <- flip S.difference <$> use done
+            let next = rest `M.union` ((:path) <$> mapWith id (S.toList nextList))
+                nextList = removeDone $ S.fromList reqs
                 rid' = _refId st
             (Right (def'', _flatTypes finSt'):) <$> inferRequest rid' finSt' next
+          where
+            exiter = (,) <$> exit def' <*> mapM (return `pairA` convertType undefined) (_requestedGlobals st)
       where
         ((req@(Global fn, t), path), rest) = M.deleteFindMin todo
+        infmap = _toInferred finSt
 
 
 convertType :: ErrF -> Inferred s -> Finalizer s TypeKey
 convertType errF = inner
   where
-    create ft = use (typeKeys . at ft) >>= \case
+    create inf ft = use (typeKeys . at ft) >>= \case
       Just tk -> return tk
       Nothing -> do
         tk <- newTypeKey
+        toInferred . at tk ?= inf
         flatTypes . at tk ?= ft
         typeKeys . at ft <?= tk
     inner :: Inferred s -> Finalizer s TypeKey
-    inner (IInt s) = create $ IntT s
-    inner (IUInt s) = create $ UIntT s
-    inner (IFloat s) = create $ FloatT s
-    inner IBool = create BoolT
+    inner i@(IInt s) = create i $ IntT s
+    inner i@(IUInt s) = create i $ UIntT s
+    inner i@(IFloat s) = create i $ FloatT s
+    inner i@IBool = create i BoolT
     inner (INewType n ts w _) = do
       ntKey <- (n,) <$> mapM inner ts
       use (newTypes . at ntKey) >>= \case
@@ -261,10 +273,10 @@ convertType errF = inner
           ft <- fromJust <$> use (flatTypes . at wtk)
           flatTypes . at tk ?= ft
           return tk
-    inner (IPointer it) = inner it >>= create . PointerT
-    inner (IStruct ps) = mapM (return `pairA` inner) ps >>= create . StructT
-    inner (IFunc is o) = (FuncT <$> mapM inner is <*> inner o) >>= create
-    inner (IProc is os) = (ProcT <$> mapM inner is <*> mapM inner os) >>= create
+    inner i@(IPointer it) = inner it >>= create i . PointerT
+    inner i@(IStruct ps) = mapM (return `pairA` inner) ps >>= create i . StructT
+    inner i@(IFunc is o) = (FuncT <$> mapM inner is <*> inner o) >>= create i
+    inner i@(IProc is os) = (ProcT <$> mapM inner is <*> mapM inner os) >>= create i
     inner (IRef r) = readBottom r >>= \case
       Unbound{} -> throwError . errF $ "Found an unbound type"
       Link it -> inner it
@@ -334,9 +346,12 @@ exErr r m = ErrorString $ "Error at " ++ show r ++ ": " ++ m
 
 enterDef :: P.CallableDefT Resolved -> Inferred s -> Inferrer s (ICallableDef s)
 enterDef d@P.FuncDef{} t = withCallableType d $ do
+  defineTypeVars .= True
   is <- mapM enter $ P.intypes d
   o <- enter $ P.outtype d
+  defineTypeVars .= False
   unify errF t $ IFunc is o
+  locals .= M.fromList (zip (P.outarg d : P.inargs d) (o : is))
   FuncDef (P.callableName d) is o
     <$> return (P.inargs d)
     <*> return (P.outarg d)
@@ -344,15 +359,22 @@ enterDef d@P.FuncDef{} t = withCallableType d $ do
     <*> return (P.callableRange d)
   where errF m = ErrorString $ "Function at " ++ show (location d) ++ " called with the wrong type: " ++ m
 enterDef d@P.ProcDef{} t = withCallableType d $ do
+  defineTypeVars .= True
   is <- mapM enter $ P.intypes d
   os <- mapM enter $ P.outtypes d
+  defineTypeVars .= False
   unify errF t $ IProc is os
+  locals .= M.fromList (zip (P.inargs d ++ P.outargs d) (is ++ os))
   ProcDef (P.callableName d) is os
     <$> return (P.inargs d)
     <*> return (P.outargs d)
     <*> enter (P.callableBody d)
     <*> return (P.callableRange d)
   where errF m = ErrorString $ "Procedure at " ++ show (location d) ++ " called with the wrong type: " ++ m
+
+instance Enterable TypeKey s (Inferred s) where
+  enter tk = use (toInferredMap . at tk) >>= justErr err
+    where err = ErrorString $ "Compiler error: could not find typekey " ++ show tk
 
 instance Enterable P.Type s (Inferred s) where
   enter (P.IntT s _) = return $ IInt s
@@ -378,7 +400,11 @@ instance Enterable P.Type s (Inferred s) where
             return . INewType n ts' w' $ Replacements hi (M.fromList ai) bp
         writeRef r $ Link t
         return t
-  enter (P.TypeVar n r) = use (typeVars . at n) >>= justErr (ErrorString $ "Unknown type variable " ++ n ++ " at " ++ show r)
+  enter (P.TypeVar n r) = use (typeVars . at n) >>= \case
+    Just t -> return t
+    Nothing -> use defineTypeVars >>= \case
+      True -> newUnbound NoRestriction >>= (typeVars . at n <?=)
+      False -> throwError . ErrorString $ "Unknown type variable " ++ n ++ " at " ++ show r
   enter (P.PointerT t _) = IPointer <$> enter t
   enter (P.StructT ps _) = IStruct <$> mapM (return `pairA` enter) ps
   enter (P.ProcT is os _) = IProc <$> mapM enter is <*> mapM enter os
@@ -413,11 +439,14 @@ instance Enterable (P.StatementT Resolved) s (IStatement s) where
     prevLocals <- use locals
     Scope <$> mapM enter s <*> return r <* (locals .= prevLocals)
   enter (P.Terminator t r) = return $ Terminator t r
-  enter (P.VarInit mut n t me r) = do -- TODO: deal with mutability at type level?
+  enter (P.VarInit mut n mt me r) = do -- TODO: deal with mutability at type level?
     (e', t') <- T.mapM enterT me >>= \case
-      Just (e, et) -> T.mapM (enter >=> unify errF et) t >> return (e, et)
-      Nothing -> (,) <$> (ExprLit <$> (Zero <$> newUnbound NoRestriction <*> return r))
-                     <*> (justErr internal t >>= enter)
+      Just (e, et) -> T.mapM (enter >=> unify errF et) mt >> return (e, et)
+      Nothing -> do
+        u <- newUnbound NoRestriction
+        t' <- justErr internal mt >>= enter
+        unify errF u t'
+        return (ExprLit $ Zero u r, t')
     locals . at n ?= t'
     return $ VarInit mut n t' e' r
     where
@@ -459,13 +488,13 @@ instance EnterableWithType (P.ExpressionT Resolved) s (IExpression s) where
   enterT (P.MemberAccess e prop r) = do
     (e', t) <- enterT e
     (a, it) <- newICompound errF t $ IMember prop
-    initialExpand a
+    attemptCompoundExpand errF a
     return (CompoundAccess e' a r, it)
     where errF m = ErrorString $ "Expression at " ++ show (location e) ++ " must have a property " ++ prop ++ ": " ++ m
   enterT (P.Subscript e bp r) = do
     (e', t) <- enterT e
     (a, it) <- mapM (T.mapM enterT) bp >>= newICompound errF t . IBracket
-    initialExpand a
+    attemptCompoundExpand errF a
     return (CompoundAccess e' a r, it)
     where errF m = ErrorString $ "Expression at " ++ show (location e) ++ " does not support the []-expression at " ++ show r ++ ": " ++ m
   enterT (P.Variable n r) = case n of
@@ -473,7 +502,7 @@ instance EnterableWithType (P.ExpressionT Resolved) s (IExpression s) where
     ReplacementLocal True prop -> do
       t <- use replacementContext
       (a, it) <- newICompound locErr t $ IMember prop
-      initialExpand a
+      attemptCompoundExpand locErr a
       return (CompoundAccess (Variable Self t r) a r, it)
     Global g -> use (callableDefs . at g) >>= \case
       Nothing -> throwError . ErrorString $ "Compiler error: unknown global " ++ g ++ " at " ++ show r
@@ -489,7 +518,7 @@ instance EnterableWithType (P.ExpressionT Resolved) s (IExpression s) where
     (f', t) <- enterT f
     (is', its) <- unzip <$> mapM enterT is
     ret <- getFuncReturn errF t its
-    return (FuncCall f' is' ret r, t)
+    return (FuncCall f' is' ret r, ret)
     where errF m = ErrorString $ "Expression at " ++ show (location f) ++ " must be a func: " ++ m
   enterT (P.ExprLit l) = (_1 %~ ExprLit) <$> enterT l
   enterT (P.TypeAssertion e t r) = do
@@ -516,12 +545,6 @@ newICompound errF t a = do
   ca <- lift . lift $ newSTRef (IUnExpanded t a u)
   restrict errF t $ PropertiesR [ca]
   return (ca, u)
-
-  --TODO: remove undefined
-initialExpand :: ICompoundAccess s -> Inferrer s ()
-initialExpand a = attemptCompoundExpand undefined a >> compoundExpanded a >>= \case
-  True -> return ()
-  False -> unexpandedCompounds %= (a:)
 
 attemptCompoundExpand :: ErrF -> ICompoundAccess s -> Inferrer s ()
 attemptCompoundExpand errF r = readRef r >>= \case
@@ -568,7 +591,7 @@ attemptCompoundExpand errF r = readRef r >>= \case
           inner _ _ = Nothing
           err = errF $ show u ++ " has no []-expression matching " ++ show bp
       Just u -> throwError . ErrorString $ show u ++ " has no []-expression matching " ++ show bp
-  e -> trace ("double expand: " ++ show e) $ return () -- NOTE: already expanded
+  _ -> return () -- NOTE: already expanded
   where
     expand retty (me, e) irepmap = do
       prevLocals <- locals <<%= M.union (snd <$> irepmap)
@@ -586,11 +609,6 @@ attemptCompoundExpand errF r = readRef r >>= \case
       _ -> return Nothing
     readTillNonPointer (IPointer t) = readTillNonPointer t
     readTillNonPointer t = return $ Just t
-
-compoundExpanded :: ICompoundAccess s -> Inferrer s Bool
-compoundExpanded a = readRef a >>= \case
-  IUnExpanded{} -> return False
-  _ -> return True
 
 makeProc :: ErrF -> Inferred s -> [Inferred s] -> [Inferred s] -> Inferrer s ()
 makeProc errF (IProc is os) newIs newOs
@@ -683,6 +701,7 @@ unify errF t1 t2 = unless (t1 == t2) $ case (t1, t2) of
   (IFunc i1 o1, IFunc i2 o2) | length i1 == length i2 -> do
     zipWithM_ uni i1 i2
     uni o1 o2
+  _ -> throwError . errF $ "Incompatible types (" ++ show t1 ++ " != " ++ show t2 ++ ")"
   where
     uni = unify errF
     linkCompression :: TVarRef s -> TVar s -> Inferrer s (TVarRef s)

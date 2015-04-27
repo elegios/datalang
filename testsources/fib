@@ -1,6 +1,4 @@
-func fib {
-  t int
-}
+func fib
 t -> t
 n -> b {
   b = 1
@@ -14,11 +12,10 @@ n -> b {
   }
 }
 
-func fibSlow {
-  t int
-}
+func fibSlow
 t -> t
 n -> b {
+  let temp : t = fib(45)
   if n <= 2 {
     b = 1
     return
@@ -26,10 +23,9 @@ n -> b {
   b = fibSlow(n-1) + fibSlow(n-2)
 }
 
-func main {
-  rType int
-}
+func main
 -> rType
 -> ret {
+  let blub : I64 = fib(45)
   ret = fibSlow(45)
 }

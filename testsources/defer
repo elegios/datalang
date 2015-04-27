@@ -1,10 +1,8 @@
-func main {
-  rType int
-}
+func main
 -> rType
 -> ret {
   ret = 0
-  mut extra := 0
+  let mut extra = 0
   defer ret = ret - 1
 
   while ret < 4 {

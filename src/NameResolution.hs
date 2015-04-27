@@ -89,8 +89,8 @@ instance Resolvable CallableDefT where
   resolve d@FuncDef{ inargs = is
                    , outarg = o
                    , callableBody = b } = do
-    let is' = Local 0 <$> is
-        o' = Local 0 o
+    let is' = Local 1 <$> is
+        o' = Local 1 o
     prevScope <- use scope
     zipWithM_ (define $ location d) is is'
     define (location d) o o'
