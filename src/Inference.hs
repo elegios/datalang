@@ -16,6 +16,7 @@ import Control.Monad.Except (ExceptT, runExceptT, throwError, MonadError)
 import Control.Lens hiding (op, universe, plate, index)
 import qualified Parser as P
 import qualified Data.Map as M
+import qualified Data.Set as S
 import qualified Data.List as List
 import qualified Data.Traversable as T
 
@@ -154,6 +155,7 @@ data ErrorMessage = ErrorString String deriving Show
 
 type Inferrer s a = StateT (InferrerState s) (ExceptT ErrorMessage (ST s)) a
 type Finalizer s a = StateT (FinalizerState s) (ExceptT ErrorMessage (ST s)) a
+type Super s a = StateT (SuperState s) (ST s) a
 
 data InferrerState s = InferrerState
                        { _typeDefs :: M.Map String (P.TypeDefT Resolved)
@@ -172,17 +174,68 @@ data FinalizerState s = FinalizerState
                         , _newTypes :: M.Map (String, [TypeKey]) TypeKey
                         , _nextTypeKey :: TypeKey
                         }
+data SuperState s = SuperState
+                    { _done :: S.Set (IRequest s)
+                    }
 
 type ErrF = String -> ErrorMessage
 
 instance Show (Replacements s) where
   show (Replacements hi ai ps) = "Replacements " ++ show hi ++ " " ++ show (M.keys ai) ++ " " ++ show (fst <$> ps)
 
+type IRequest s = Request (Inferred s)
+type Request t = (Resolved, t)
+
 makeLenses ''InferrerState
 makeLenses ''FinalizerState
+makeLenses ''SuperState
 
-infer :: P.CallableDefT Resolved -> InferrerState s -> ST s (Either ErrorMessage (ICallableDef s))
-infer d s = runExceptT $ evalStateT (enter d) s
+infer :: P.SourceFileT Resolved -> [Request P.Type] -> [Either ErrorMessage (CallableDef, M.Map TypeKey FlatType)]
+infer (P.SourceFile tDefs cDefs) requests = runST $
+  runExceptT (runStateT (mapM convertRequest requests) basicInferrerState) >>= \case
+    Left e -> return [Left e]
+    Right (rs, st) -> flip evalStateT initSuperState $
+      inferRequest (_refId st) initFinalizerState ((:[]) <$> mapWith id rs)
+  where
+    convertRequest (n, t) = (n,) <$> enter t
+    initSuperState = SuperState
+      { _done = S.empty
+      }
+    initFinalizerState = FinalizerState
+      { _flatTypes = M.empty
+      , _typeKeys = M.empty
+      , _newTypes = M.empty
+      , _nextTypeKey = TypeKey 0
+      }
+    basicInferrerState = InferrerState
+      { _typeDefs = mapWith P.typeName tDefs
+      , _callableDefs = callables
+      , _typeVars = M.empty
+      , _locals = M.empty
+      , _enteredNames = M.empty
+      , _unexpandedCompounds = []
+      , _replacementContext = error "Compiler error: not in a replacement context, yet tried to use one"
+      , _requestedGlobals = []
+      , _refId = 0
+      }
+    callables = mapWith P.callableName cDefs
+    runInferrer rid = lift . runExceptT . flip runStateT (basicInferrerState {_refId = rid})
+    runFinalizer st = lift . runExceptT . flip runStateT st
+    inferRequest :: Int -> FinalizerState s -> M.Map (IRequest s) [IRequest s] -> Super s [Either ErrorMessage (CallableDef, M.Map TypeKey FlatType)]
+    -- inferRequest _ todo | M.null todo = return []
+    inferRequest rid finSt todo = (done %= S.insert req) >> case M.lookup fn callables of
+      Nothing -> error $ "Compiler error: could not find callable " ++ fn
+      Just def -> runInferrer rid (enterDef def t) >>= \case
+        Left e -> (Left e:) <$> inferRequest rid finSt rest
+        Right (def', st) -> runFinalizer finSt (exit def') >>= \case
+          Left e -> (Left e:) <$> inferRequest rid finSt rest
+          Right (def'', finSt') -> do
+            let next = rest `M.union` ((:path) <$> mapWith id (_requestedGlobals st))
+                rid' = _refId st
+            (Right (def'', _flatTypes finSt'):) <$> inferRequest rid' finSt' next
+      where
+        ((req@(Global fn, t), path), rest) = M.deleteFindMin todo
+
 
 convertType :: ErrF -> Inferred s -> Finalizer s TypeKey
 convertType errF = inner
@@ -279,21 +332,27 @@ instance Finalizable (ILiteral s) s Literal where
 exErr :: SourceRange -> ErrF
 exErr r m = ErrorString $ "Error at " ++ show r ++ ": " ++ m
 
-instance Enterable (P.CallableDefT Resolved) s (ICallableDef s) where
-  enter d@P.FuncDef{} = withCallableType d $ FuncDef (P.callableName d)
-    <$> mapM enter (P.intypes d)
-    <*> enter (P.outtype d)
-    <*> return (P.inargs d)
+enterDef :: P.CallableDefT Resolved -> Inferred s -> Inferrer s (ICallableDef s)
+enterDef d@P.FuncDef{} t = withCallableType d $ do
+  is <- mapM enter $ P.intypes d
+  o <- enter $ P.outtype d
+  unify errF t $ IFunc is o
+  FuncDef (P.callableName d) is o
+    <$> return (P.inargs d)
     <*> return (P.outarg d)
     <*> enter (P.callableBody d)
     <*> return (P.callableRange d)
-  enter d@P.ProcDef{} = withCallableType d $ ProcDef (P.callableName d)
-    <$> mapM enter (P.intypes d)
-    <*> mapM enter (P.outtypes d)
-    <*> return (P.inargs d)
+  where errF m = ErrorString $ "Function at " ++ show (location d) ++ " called with the wrong type: " ++ m
+enterDef d@P.ProcDef{} t = withCallableType d $ do
+  is <- mapM enter $ P.intypes d
+  os <- mapM enter $ P.outtypes d
+  unify errF t $ IProc is os
+  ProcDef (P.callableName d) is os
+    <$> return (P.inargs d)
     <*> return (P.outargs d)
     <*> enter (P.callableBody d)
     <*> return (P.callableRange d)
+  where errF m = ErrorString $ "Procedure at " ++ show (location d) ++ " called with the wrong type: " ++ m
 
 instance Enterable P.Type s (Inferred s) where
   enter (P.IntT s _) = return $ IInt s
@@ -718,6 +777,9 @@ unionWithM f a b =
     $ M.unionWith f' (M.map return a) (M.map return b)
   where
     f' mx my = mx >>= \x -> my >>= \y -> f x y
+
+mapWith :: Ord k => (a -> k) -> [a] -> M.Map k a
+mapWith f = M.fromList . map (\a -> (f a, a))
 
 {-
 Three stage inference:
