@@ -329,7 +329,7 @@ instance Enterable (P.StatementT Resolved) s (IStatement s) where
     (p', t) <- enterT p
     (is', its) <- unzip <$> mapM enterT is
     (os', ots) <- unzip <$> mapM enterT os
-    makeProc errF t its ots
+    unify errF t $ IProc its ots
     return $ ProcCall p' is' os' r
     where errF m = ErrorString $ show r ++ ": " ++ m
   enter (P.Defer s r) = Defer <$> enter s <*> return r
@@ -392,7 +392,7 @@ instance EnterableWithType (P.ExpressionT Resolved) s (IExpression s) where
       AddressOf -> return $ IPointer t
       AriNegate -> restrict numErr t $ NumR NoSpec
       BinNegate -> restrict uintErr t UIntR
-      Not -> makeBool boolErr t
+      Not -> unify boolErr t IBool >> return IBool
     where
       ptrErr = mustBeA "pointer"
       numErr = mustBeA "number"
@@ -496,19 +496,6 @@ newUnbound :: IRestriction s -> Inferrer s (Inferred s)
 newUnbound restr =
   IRef <$> (TVarRef <$> (refId <<+= 1) <*> (lift . lift . newSTRef $ Unbound restr))
 
-makeProc :: ErrF -> Inferred s -> [Inferred s] -> [Inferred s] -> Inferrer s ()
-makeProc errF (IProc is os) newIs newOs
-  | length is == length newIs && length os == length newOs
-    = zipWithM_ (unify errF) is newIs >> zipWithM_ (unify errF) os newOs
-  | otherwise = throwError . errF $ "Got an incorrect number of arguments, got # " ++
-                show (length newIs) ++ " # " ++ show (length newOs) ++ ", wanted # " ++
-                show (length is) ++ " # " ++ show (length os)
-makeProc errF (IRef r) is os = readRef r >>= \case
-  Unbound NoRestriction -> writeRef r . Link $ IProc is os
-  u@Unbound{} -> throwError . errF $ "Cannot change " ++ show u ++ " into a proc"
-  Link t -> makeProc errF t is os
-makeProc errF u _ _ = throwError . errF $ show u ++ " cannot be a proc"
-
 getFuncReturn :: ErrF -> Inferred s -> [Inferred s] -> Inferrer s (Inferred s)
 getFuncReturn errF (IFunc is ret) newIs
   | length is == length newIs = zipWithM_ (unify errF) is newIs >> return ret
@@ -522,13 +509,6 @@ getFuncReturn errF (IRef r) is = readRef r >>= \case
   Link t -> getFuncReturn errF t is
   u -> throwError . errF $ "Cannot change " ++ show u ++ " into a func"
 getFuncReturn errF u _ = throwError . errF $ show u ++ " cannot be a func"
-
-makeBool :: ErrF -> Inferred s -> Inferrer s (Inferred s)
-makeBool _ IBool = return IBool
-makeBool errF ir@(IRef r) = readRef r >>= \case
-  Unbound NoRestriction -> writeRef r (Link IBool) >> return ir
-  Link t -> makeBool errF t
-  u -> throwError . errF $ show u ++ " cannot be a bool"
 
 derefPtr :: ErrF -> Inferred s -> Inferrer s (Inferred s)
 derefPtr _ (IPointer t) = return t
