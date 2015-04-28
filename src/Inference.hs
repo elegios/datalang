@@ -22,6 +22,8 @@ import qualified Data.Traversable as T
 
 import Debug.Trace
 
+-- AST types
+
 type ICallableDef s = CallableDefT (Inferred s) (ICompoundAccess s)
 type CallableDef = CallableDefT TypeKey CompoundAccess
 data CallableDefT t a = FuncDef
@@ -42,9 +44,6 @@ data CallableDefT t a = FuncDef
                         , callableBody :: StatementT t a
                         , callableRange :: SourceRange
                         }
-
-instance Source (CallableDefT t a) where
-  location = callableRange
 
 type IStatement s = StatementT (Inferred s) (ICompoundAccess s)
 type Statement = StatementT TypeKey CompoundAccess
@@ -67,15 +66,15 @@ data ExpressionT t a = Bin BinOp (ExpressionT t a) (ExpressionT t a) SourceRange
                      | ExprLit (LiteralT t)
                      deriving Show
 
+type IRepMap s = M.Map Resolved (IExpression s, Inferred s)
+data IAccess s = IMember String | IBracket [Either String (IExpression s, Inferred s)] deriving Show
+
 type ICompoundAccess s = STRef s (MaybeExpanded s)
 data MaybeExpanded s = IUnExpanded (Inferred s) (IAccess s) (Inferred s)
                      | IExpanded (IRepMap s) (Maybe (IExpression s)) (IExpression s)
                      | IExpandedMember String
                      | IExpandedSubscript (IExpression s)
                      deriving Show
-
-type IRepMap s = M.Map Resolved (IExpression s, Inferred s)
-data IAccess s = IMember String | IBracket [Either String (IExpression s, Inferred s)] deriving Show
 
 type RepMap = M.Map Resolved Expression
 data CompoundAccess = Expanded RepMap (Maybe Expression) Expression
@@ -97,9 +96,6 @@ data IRestriction s = NoRestriction
                     | UIntR
                     | NumR NumSpec
                     deriving (Show, Eq)
-
-instance Show (ICompoundAccess s) where
-  show _ = "compoundaccess"
 
 newtype TypeKey = TypeKey { representation :: Int } deriving (Eq, Ord, Show)
 
@@ -134,15 +130,11 @@ data TVar s = Unbound (IRestriction s) | Link (Inferred s) deriving (Eq, Show)
 data TVarRefT s a = TVarRef Int (STRef s a) deriving Eq
 type TVarRef s = TVarRefT s (TVar s)
 
-instance Eq (Replacements s) where
-  _ == _ = True
-instance Ord (Replacements s) where
-  compare _ _ = EQ
+-- Inference types
 
-instance Show (TVarRefT s a) where
-  show (TVarRef i _) = "tvarref" ++ show i
-instance Ord (TVarRefT s a) where
-  TVarRef i1 _ `compare` TVarRef i2 _ = i1 `compare` i2
+data ErrorMessage = ErrorString String deriving Show
+
+type ErrF = String -> ErrorMessage
 
 class Enterable a s b | a s -> b where
   enter :: a -> Inferrer s b
@@ -150,8 +142,6 @@ class EnterableWithType a s b | a s -> b where
   enterT :: a -> Inferrer s (b, Inferred s)
 class Finalizable a s b | a s -> b where
   exit :: a -> Finalizer s b
-
-data ErrorMessage = ErrorString String deriving Show
 
 type Inferrer s a = StateT (InferrerState s) (ExceptT ErrorMessage (ST s)) a
 type Finalizer s a = StateT (FinalizerState s) (ExceptT ErrorMessage (ST s)) a
@@ -180,19 +170,38 @@ data SuperState s = SuperState
                     { _done :: S.Set (IRequest s)
                     }
 
-type ErrF = String -> ErrorMessage
+type IRequest s = RequestT TypeKey
+type Request = RequestT P.Type
+type RequestT t = (Resolved, t)
+
+-- Basic instances
+
+instance Source (CallableDefT t a) where
+  location = callableRange
+
+instance Show (ICompoundAccess s) where
+  show _ = "compoundaccess"
+
+instance Eq (Replacements s) where
+  _ == _ = True
+instance Ord (Replacements s) where
+  compare _ _ = EQ
+
+instance Show (TVarRefT s a) where
+  show (TVarRef i _) = "tvarref" ++ show i
+instance Ord (TVarRefT s a) where
+  TVarRef i1 _ `compare` TVarRef i2 _ = i1 `compare` i2
 
 instance Show (Replacements s) where
   show (Replacements hi ai ps) = "Replacements " ++ show hi ++ " " ++ show (M.keys ai) ++ " " ++ show (fst <$> ps)
-
-type IRequest s = Request TypeKey
-type Request t = (Resolved, t)
 
 makeLenses ''InferrerState
 makeLenses ''FinalizerState
 makeLenses ''SuperState
 
-infer :: ResolvedSource -> [Request P.Type] -> [Either ErrorMessage (CallableDef, M.Map TypeKey FlatType)]
+-- Big fat runner function
+
+infer :: ResolvedSource -> [Request] -> [Either ErrorMessage (CallableDef, M.Map TypeKey FlatType)]
 infer (ResolvedSource tDefs cDefs) requests = runST $ flip evalStateT initSuperState $
   runInferrer 0 M.empty (mapM convReq requests) >>= \case
     Left e -> return [Left e]
@@ -230,7 +239,7 @@ infer (ResolvedSource tDefs cDefs) requests = runST $ flip evalStateT initSuperS
     inferRequest :: Int -> FinalizerState s -> M.Map (IRequest s) [IRequest s] -> Super s [Either ErrorMessage (CallableDef, M.Map TypeKey FlatType)]
     inferRequest _ _ todo | M.null todo = return []
     inferRequest rid finSt todo = (done %= S.insert req) >> case trace ("requested " ++ show req) $ M.lookup fn cDefs of
-      Nothing -> error $ "Compiler error: could not find callable " ++ fn -- TODO: pass toInferred to InferrerState
+      Nothing -> error $ "Compiler error: could not find callable " ++ fn
       Just def -> runInferrer rid infmap (enter t >>= enterDef def) >>= \case
         Left e -> (Left e:) <$> inferRequest rid finSt rest
         Right (def', st) -> runFinalizer finSt exiter >>= \case
@@ -247,102 +256,7 @@ infer (ResolvedSource tDefs cDefs) requests = runST $ flip evalStateT initSuperS
         ((req@(Global fn, t), path), rest) = M.deleteFindMin todo
         infmap = _toInferred finSt
 
-
-convertType :: ErrF -> Inferred s -> Finalizer s TypeKey
-convertType errF = inner
-  where
-    create inf ft = use (typeKeys . at ft) >>= \case
-      Just tk -> return tk
-      Nothing -> do
-        tk <- newTypeKey
-        toInferred . at tk ?= inf
-        flatTypes . at tk ?= ft
-        typeKeys . at ft <?= tk
-    inner :: Inferred s -> Finalizer s TypeKey
-    inner i@(IInt s) = create i $ IntT s
-    inner i@(IUInt s) = create i $ UIntT s
-    inner i@(IFloat s) = create i $ FloatT s
-    inner i@IBool = create i BoolT
-    inner (INewType n ts w _) = do
-      ntKey <- (n,) <$> mapM inner ts
-      use (newTypes . at ntKey) >>= \case
-        Just tk -> return tk
-        Nothing -> do
-          tk <- newTypeKey >>= (newTypes . at ntKey <?=)
-          wtk <- inner w
-          ft <- fromJust <$> use (flatTypes . at wtk)
-          flatTypes . at tk ?= ft
-          return tk
-    inner i@(IPointer it) = inner it >>= create i . PointerT
-    inner i@(IStruct ps) = mapM (return `pairA` inner) ps >>= create i . StructT
-    inner i@(IFunc is o) = (FuncT <$> mapM inner is <*> inner o) >>= create i
-    inner i@(IProc is os) = (ProcT <$> mapM inner is <*> mapM inner os) >>= create i
-    inner (IRef r) = readBottom r >>= \case
-      Unbound{} -> throwError . errF $ "Found an unbound type"
-      Link it -> inner it
-      where
-        readBottom ref = readRef ref >>= \case
-          Link (IRef ref') -> readBottom ref'
-          b -> return b
-
-newTypeKey :: Finalizer s TypeKey
-newTypeKey = nextTypeKey <<%= TypeKey . (+1) . representation
-
-instance Finalizable (ICallableDef s) s CallableDef where
-  exit d@FuncDef{} = FuncDef (callableName d)
-                 <$> mapM (convertType . exErr $ location d) (intypes d)
-                 <*> convertType (exErr $ location d) (outtype d)
-                 <*> return (inargs d)
-                 <*> return (outarg d)
-                 <*> exit (callableBody d)
-                 <*> return (location d)
-  exit d@ProcDef{} = ProcDef (callableName d)
-                 <$> mapM (convertType . exErr $ location d) (intypes d)
-                 <*> mapM (convertType . exErr $ location d) (outtypes d)
-                 <*> return (inargs d)
-                 <*> return (outargs d)
-                 <*> exit (callableBody d)
-                 <*> return (location d)
-
-instance Finalizable (IStatement s) s Statement where
-  exit (ProcCall p is os r) =
-    ProcCall <$> exit p <*> mapM exit is <*> mapM exit os <*> return r
-  exit (Defer s r) = Defer <$> exit s <*> return r
-  exit (ShallowCopy a e r) = ShallowCopy <$> exit a <*> exit e <*> return r
-  exit (If c t me r) = If <$> exit c <*> exit t <*> T.mapM exit me <*> return r
-  exit (While c s r) = While <$> exit c <*> exit s <*> return r
-  exit (Scope stmnts r) = Scope <$> mapM exit stmnts <*> return r
-  exit (Terminator t r) = return $ Terminator t r
-  exit (VarInit mut n t e r) =
-    VarInit mut n <$> convertType (exErr r) t <*> exit e <*> return r
-
-instance Finalizable (IExpression s) s Expression where
-  exit (Bin o e1 e2 r) = Bin o <$> exit e1 <*> exit e2 <*> return r
-  exit (Un o e r) = Un o <$> exit e <*> return r
-  exit (CompoundAccess e a r) =
-    CompoundAccess <$> exit e <*> (readRef a >>= access) <*> return r
-    where
-      access = \case
-        IUnExpanded{} -> throwError . ErrorString $ "Compiler error: unexpanded compound at " ++ show r
-        IExpanded repmap cond rep ->
-          Expanded <$> T.mapM (exit . fst) repmap <*> T.mapM exit cond <*> exit rep
-        IExpandedMember m -> return $ ExpandedMember m
-        IExpandedSubscript index -> ExpandedSubscript <$> exit index
-  exit (Variable n t r) = Variable n <$> convertType (exErr r) t <*> return r
-  exit (FuncCall f as ret r) =
-    FuncCall <$> exit f <*> mapM exit as <*> convertType (exErr r) ret <*> return r
-  exit (ExprLit l) = ExprLit <$> exit l
-
-instance Finalizable (ILiteral s) s Literal where
-  exit (ILit i t r) = ILit i <$> convertType (exErr r) t <*> return r
-  exit (FLit d t r) = FLit d <$> convertType (exErr r) t <*> return r
-  exit (BLit b r) = return $ BLit b r
-  exit (Null t r) = Null <$> convertType (exErr r) t <*> return r
-  exit (Undef t r) = Undef <$> convertType (exErr r) t <*> return r
-  exit (Zero t r) = Zero <$> convertType (exErr r) t <*> return r
-
-exErr :: SourceRange -> ErrF
-exErr r m = ErrorString $ "Error at " ++ show r ++ ": " ++ m
+-- Enter phase
 
 enterDef :: P.CallableDefT Resolved -> Inferred s -> Inferrer s (ICallableDef s)
 enterDef d@P.FuncDef{} t = withCallableType d $ do
@@ -488,13 +402,11 @@ instance EnterableWithType (P.ExpressionT Resolved) s (IExpression s) where
   enterT (P.MemberAccess e prop r) = do
     (e', t) <- enterT e
     (a, it) <- newICompound errF t $ IMember prop
-    attemptCompoundExpand errF a
     return (CompoundAccess e' a r, it)
     where errF m = ErrorString $ "Expression at " ++ show (location e) ++ " must have a property " ++ prop ++ ": " ++ m
   enterT (P.Subscript e bp r) = do
     (e', t) <- enterT e
     (a, it) <- mapM (T.mapM enterT) bp >>= newICompound errF t . IBracket
-    attemptCompoundExpand errF a
     return (CompoundAccess e' a r, it)
     where errF m = ErrorString $ "Expression at " ++ show (location e) ++ " does not support the []-expression at " ++ show r ++ ": " ++ m
   enterT (P.Variable n r) = case n of
@@ -502,7 +414,6 @@ instance EnterableWithType (P.ExpressionT Resolved) s (IExpression s) where
     ReplacementLocal True prop -> do
       t <- use replacementContext
       (a, it) <- newICompound locErr t $ IMember prop
-      attemptCompoundExpand locErr a
       return (CompoundAccess (Variable Self t r) a r, it)
     Global g -> use (callableDefs . at g) >>= \case
       Nothing -> throwError . ErrorString $ "Compiler error: unknown global " ++ g ++ " at " ++ show r
@@ -539,6 +450,8 @@ instance EnterableWithType P.Literal s (ILiteral s) where
 litF :: (Inferred s -> SourceRange -> ILiteral s) -> SourceRange -> IRestriction s -> Inferrer s (ILiteral s, Inferred s)
 litF constr r restr = newUnbound restr >>= (\t -> return (constr t r, t))
 
+-- Enter library functions
+
 newICompound :: ErrF -> Inferred s -> IAccess s -> Inferrer s (ICompoundAccess s, Inferred s)
 newICompound errF t a = do
   u <- newUnbound NoRestriction
@@ -546,69 +459,42 @@ newICompound errF t a = do
   restrict errF t $ PropertiesR [ca]
   return (ca, u)
 
-attemptCompoundExpand :: ErrF -> ICompoundAccess s -> Inferrer s ()
-attemptCompoundExpand errF r = readRef r >>= \case
-  IUnExpanded t (IMember m) retty -> memberAccess t
-    where
-      memberAccess = readTillNonPointer >=> \case
-        Nothing -> return ()
-        Just (IStruct ps) | isJust mT -> do
-          unify errF retty $ fromJust mT
-          writeRef r $ IExpandedMember m
-          where mT = List.lookup m ps
-        Just u@(INewType _ _ w (Replacements hi ai _)) -> case M.lookup m ai of
-          Nothing -> case hi of
-            P.HideSome hidden | m `notElem` hidden -> memberAccess w
-            _ -> throwError . errF $ show u ++ " has no member " ++ m
-          Just rep -> do
-            prevReplacementContext <- replacementContext <<.= w
-            expand retty rep M.empty
-            replacementContext .= prevReplacementContext
-        Just u -> throwError . errF $ show u ++ " has no member " ++ m
-  IUnExpanded t (IBracket bp) retty ->
-    readTillType t >>= \case
-      Nothing -> return ()
-      Just (IPointer it) -> case bp of
-        [Right (e, intT)] -> do
-          restrict errF intT (NumR IntSpec)
-          unify errF retty it
-          writeRef r $ IExpandedSubscript e
-        _ -> throwError . errF $ "A pointer only supports [int]"
-      Just u@(INewType _ _ w (Replacements _ _ ntbp)) -> do
-        useMatch <- justErr err . msum $ match <$> ntbp
-        prevReplacementContext <- replacementContext <<.= w
-        useMatch
-        replacementContext .= prevReplacementContext
-        where
-          match (pattern, rep) = (>>= expand retty rep) <$> inner pattern bp
-          inner [] [] = Just $ return M.empty
-          inner (P.BrId n _ : pTail) (Right rep : bpTail) =
-            (M.insert n rep <$>) <$> inner pTail bpTail
-          inner (P.BrId n (Just rep) : pTail) bpTail =
-            (M.insert n <$> enterT rep <*>) <$> inner pTail bpTail
-          inner (P.BrOp o : pTail) (Left o' : bpTail)
-            | o == o' = inner pTail bpTail
-          inner _ _ = Nothing
-          err = errF $ show u ++ " has no []-expression matching " ++ show bp
-      Just u -> throwError . ErrorString $ show u ++ " has no []-expression matching " ++ show bp
-  _ -> return () -- NOTE: already expanded
+createCallableType :: P.CallableDefT v -> Inferrer s (Inferred s)
+createCallableType d@P.FuncDef{P.intypes = its, P.outtype = ot} =
+  withCallableType d $ IFunc <$> mapM enter its <*> enter ot
+
+createCallableType d@P.ProcDef{P.intypes = its, P.outtypes = ots} =
+  withCallableType d $ IProc <$> mapM enter its <*> mapM enter ots
+
+withCallableType :: P.CallableDefT v -> Inferrer s a -> Inferrer s a
+withCallableType d m = do
+  newTypeVars <- M.fromList <$> mapM makeVar typevars
+  prevTypeVars <- typeVars <<%= M.union newTypeVars
+  m <* (typeVars .= prevTypeVars)
   where
-    expand retty (me, e) irepmap = do
-      prevLocals <- locals <<%= M.union (snd <$> irepmap)
-      me' <- T.mapM (enterT >=> \(e', et) -> unify errF IBool et >> return e') me
-      (e', t) <- enterT e
-      unify errF retty t
-      writeRef r $ IExpanded irepmap me' e'
-      locals .= prevLocals
-    readTillType (IRef tref) = readRef tref >>= \case
-      Link t -> readTillType t
-      _ -> return Nothing
-    readTillType t = return $ Just t
-    readTillNonPointer (IRef tref) = readRef tref >>= \case
-      Link t -> readTillNonPointer t
-      _ -> return Nothing
-    readTillNonPointer (IPointer t) = readTillNonPointer t
-    readTillNonPointer t = return $ Just t
+    makeVar n = (n,) <$> newUnbound NoRestriction
+    typevars = [n | P.TypeVar n _ <- universeBi ts]
+    ts = case d of
+      P.FuncDef{P.intypes = its, P.outtype = ot} -> ot : its
+      P.ProcDef{P.intypes = its, P.outtypes = ots} -> its ++ ots
+
+withTypeVars :: P.Type -> [String] -> Inferrer s a -> Inferrer s ([Inferred s], a)
+withTypeVars (P.NamedT n ts r) ps i = do
+  when (length ps /= length ts) $ do
+    let errS = "Incorrect usage of named type " ++ n ++ " at " ++ show r ++ ": " ++
+               "wrong number of type arguments, got " ++ show (length ts) ++ ", wanted"
+               ++ show (length ps)
+    throwError $ ErrorString errS
+  ts' <- mapM enter ts
+  prevTypeVars <- typeVars <<%= M.union (M.fromList $ zip ps ts')
+  a <- i
+  typeVars .= prevTypeVars
+  return (ts', a)
+withTypeVars t _ _ = error $ "(Compiler error): Incorrect usage of withTypeVars, " ++ show t ++ " should be a NamedT"
+
+newUnbound :: IRestriction s -> Inferrer s (Inferred s)
+newUnbound restr =
+  IRef <$> (TVarRef <$> (refId <<+= 1) <*> (lift . lift . newSTRef $ Unbound restr))
 
 makeProc :: ErrF -> Inferred s -> [Inferred s] -> [Inferred s] -> Inferrer s ()
 makeProc errF (IProc is os) newIs newOs
@@ -653,29 +539,6 @@ derefPtr errF (IRef r) = readRef r >>= \case
     return u
   Link t -> derefPtr errF t
   u -> throwError . errF $ show u ++ " cannot be a pointer"
-
-createCallableType :: P.CallableDefT v -> Inferrer s (Inferred s)
-createCallableType d@P.FuncDef{P.intypes = its, P.outtype = ot} =
-  withCallableType d $ IFunc <$> mapM enter its <*> enter ot
-
-createCallableType d@P.ProcDef{P.intypes = its, P.outtypes = ots} =
-  withCallableType d $ IProc <$> mapM enter its <*> mapM enter ots
-
-withCallableType :: P.CallableDefT v -> Inferrer s a -> Inferrer s a
-withCallableType d m = do
-  newTypeVars <- M.fromList <$> mapM makeVar typevars
-  prevTypeVars <- typeVars <<%= M.union newTypeVars
-  m <* (typeVars .= prevTypeVars)
-  where
-    makeVar n = (n,) <$> newUnbound NoRestriction
-    typevars = [n | P.TypeVar n _ <- universeBi ts]
-    ts = case d of
-      P.FuncDef{P.intypes = its, P.outtype = ot} -> ot : its
-      P.ProcDef{P.intypes = its, P.outtypes = ots} -> its ++ ots
-
-newUnbound :: IRestriction s -> Inferrer s (Inferred s)
-newUnbound restr =
-  IRef <$> (TVarRef <$> (refId <<+= 1) <*> (lift . lift . newSTRef $ Unbound restr))
 
 unify :: ErrF -> Inferred s -> Inferred s -> Inferrer s ()
 unify errF t1 t2 = unless (t1 == t2) $ case (t1, t2) of
@@ -754,6 +617,180 @@ applyRestriction errF IStruct{} (PropertiesR expands) =
 
 applyRestriction errF t restr = throwError . errF $ "Could not apply restriction " ++ show restr ++ " on type " ++ show t
 
+attemptCompoundExpand :: ErrF -> ICompoundAccess s -> Inferrer s ()
+attemptCompoundExpand errF r = readRef r >>= \case
+  IUnExpanded t (IMember m) retty -> memberAccess t
+    where
+      memberAccess = readTillNonPointer >=> \case
+        Nothing -> return ()
+        Just (IStruct ps) | isJust mT -> do
+          unify errF retty $ fromJust mT
+          writeRef r $ IExpandedMember m
+          where mT = List.lookup m ps
+        Just u@(INewType _ _ w (Replacements hi ai _)) -> case M.lookup m ai of
+          Nothing -> case hi of
+            P.HideSome hidden | m `notElem` hidden -> memberAccess w
+            _ -> throwError . errF $ show u ++ " has no member " ++ m
+          Just rep -> do
+            prevReplacementContext <- replacementContext <<.= w
+            expand retty rep M.empty
+            replacementContext .= prevReplacementContext
+        Just u -> throwError . errF $ show u ++ " has no member " ++ m
+  IUnExpanded t (IBracket bp) retty ->
+    readTillType t >>= \case
+      Nothing -> return ()
+      Just (IPointer it) -> case bp of
+        [Right (e, intT)] -> do
+          restrict errF intT (NumR IntSpec)
+          unify errF retty it
+          writeRef r $ IExpandedSubscript e
+        _ -> throwError . errF $ "A pointer only supports [int]"
+      Just u@(INewType _ _ w (Replacements _ _ ntbp)) -> do
+        useMatch <- justErr err . msum $ match <$> ntbp
+        prevReplacementContext <- replacementContext <<.= w
+        useMatch
+        replacementContext .= prevReplacementContext
+        where
+          match (pattern, rep) = (>>= expand retty rep) <$> inner pattern bp
+          inner [] [] = Just $ return M.empty
+          inner (P.BrId n _ : pTail) (Right rep : bpTail) =
+            (M.insert n rep <$>) <$> inner pTail bpTail
+          inner (P.BrId n (Just rep) : pTail) bpTail =
+            (M.insert n <$> enterT rep <*>) <$> inner pTail bpTail
+          inner (P.BrOp o : pTail) (Left o' : bpTail)
+            | o == o' = inner pTail bpTail
+          inner _ _ = Nothing
+          err = errF $ show u ++ " has no []-expression matching " ++ show bp
+      Just u -> throwError . ErrorString $ show u ++ " has no []-expression matching " ++ show bp
+  u -> trace ("double expand of " ++ show u) $ return () -- NOTE: already expanded
+  where
+    expand retty (me, e) irepmap = do
+      prevLocals <- locals <<%= M.union (snd <$> irepmap)
+      me' <- T.mapM (enterT >=> \(e', et) -> unify errF IBool et >> return e') me
+      (e', t) <- enterT e
+      unify errF retty t
+      writeRef r $ IExpanded irepmap me' e'
+      locals .= prevLocals
+    readTillType (IRef tref) = readRef tref >>= \case
+      Link t -> readTillType t
+      _ -> return Nothing
+    readTillType t = return $ Just t
+    readTillNonPointer (IRef tref) = readRef tref >>= \case
+      Link t -> readTillNonPointer t
+      _ -> return Nothing
+    readTillNonPointer (IPointer t) = readTillNonPointer t
+    readTillNonPointer t = return $ Just t
+
+-- Finalizer phase
+
+convertType :: ErrF -> Inferred s -> Finalizer s TypeKey
+convertType errF = inner
+  where
+    create inf ft = use (typeKeys . at ft) >>= \case
+      Just tk -> return tk
+      Nothing -> do
+        tk <- newTypeKey
+        toInferred . at tk ?= inf
+        flatTypes . at tk ?= ft
+        typeKeys . at ft <?= tk
+    inner :: Inferred s -> Finalizer s TypeKey
+    inner i@(IInt s) = create i $ IntT s
+    inner i@(IUInt s) = create i $ UIntT s
+    inner i@(IFloat s) = create i $ FloatT s
+    inner i@IBool = create i BoolT
+    inner (INewType n ts w _) = do
+      ntKey <- (n,) <$> mapM inner ts
+      use (newTypes . at ntKey) >>= \case
+        Just tk -> return tk
+        Nothing -> do
+          tk <- newTypeKey >>= (newTypes . at ntKey <?=)
+          wtk <- inner w
+          ft <- fromJust <$> use (flatTypes . at wtk)
+          flatTypes . at tk ?= ft
+          return tk
+    inner i@(IPointer it) = inner it >>= create i . PointerT
+    inner i@(IStruct ps) = mapM (return `pairA` inner) ps >>= create i . StructT
+    inner i@(IFunc is o) = (FuncT <$> mapM inner is <*> inner o) >>= create i
+    inner i@(IProc is os) = (ProcT <$> mapM inner is <*> mapM inner os) >>= create i
+    inner (IRef r) = readBottom r >>= \case
+      Unbound{} -> throwError . errF $ "Found an unbound type"
+      Link it -> inner it
+      where
+        readBottom ref = readRef ref >>= \case
+          Link (IRef ref') -> readBottom ref'
+          b -> return b
+
+newTypeKey :: Finalizer s TypeKey
+newTypeKey = nextTypeKey <<%= TypeKey . (+1) . representation
+
+instance Finalizable (ICallableDef s) s CallableDef where
+  exit d@FuncDef{} = FuncDef (callableName d)
+                 <$> mapM (convertType . exErr $ location d) (intypes d)
+                 <*> convertType (exErr $ location d) (outtype d)
+                 <*> return (inargs d)
+                 <*> return (outarg d)
+                 <*> exit (callableBody d)
+                 <*> return (location d)
+  exit d@ProcDef{} = ProcDef (callableName d)
+                 <$> mapM (convertType . exErr $ location d) (intypes d)
+                 <*> mapM (convertType . exErr $ location d) (outtypes d)
+                 <*> return (inargs d)
+                 <*> return (outargs d)
+                 <*> exit (callableBody d)
+                 <*> return (location d)
+
+instance Finalizable (IStatement s) s Statement where
+  exit (ProcCall p is os r) =
+    ProcCall <$> exit p <*> mapM exit is <*> mapM exit os <*> return r
+  exit (Defer s r) = Defer <$> exit s <*> return r
+  exit (ShallowCopy a e r) = ShallowCopy <$> exit a <*> exit e <*> return r
+  exit (If c t me r) = If <$> exit c <*> exit t <*> T.mapM exit me <*> return r
+  exit (While c s r) = While <$> exit c <*> exit s <*> return r
+  exit (Scope stmnts r) = Scope <$> mapM exit stmnts <*> return r
+  exit (Terminator t r) = return $ Terminator t r
+  exit (VarInit mut n t e r) =
+    VarInit mut n <$> convertType (exErr r) t <*> exit e <*> return r
+
+instance Finalizable (IExpression s) s Expression where
+  exit (Bin o e1 e2 r) = Bin o <$> exit e1 <*> exit e2 <*> return r
+  exit (Un o e r) = Un o <$> exit e <*> return r
+  exit (CompoundAccess e a r) =
+    CompoundAccess <$> exit e <*> (readRef a >>= access) <*> return r
+    where
+      access = \case
+        IUnExpanded{} -> throwError . ErrorString $ "Compiler error: unexpanded compound at " ++ show r
+        IExpanded repmap cond rep ->
+          Expanded <$> T.mapM (exit . fst) repmap <*> T.mapM exit cond <*> exit rep
+        IExpandedMember m -> return $ ExpandedMember m
+        IExpandedSubscript index -> ExpandedSubscript <$> exit index
+  exit (Variable n t r) = Variable n <$> convertType (exErr r) t <*> return r
+  exit (FuncCall f as ret r) =
+    FuncCall <$> exit f <*> mapM exit as <*> convertType (exErr r) ret <*> return r
+  exit (ExprLit l) = ExprLit <$> exit l
+
+instance Finalizable (ILiteral s) s Literal where
+  exit (ILit i t r) = ILit i <$> convertType (exErr r) t <*> return r
+  exit (FLit d t r) = FLit d <$> convertType (exErr r) t <*> return r
+  exit (BLit b r) = return $ BLit b r
+  exit (Null t r) = Null <$> convertType (exErr r) t <*> return r
+  exit (Undef t r) = Undef <$> convertType (exErr r) t <*> return r
+  exit (Zero t r) = Zero <$> convertType (exErr r) t <*> return r
+
+exErr :: SourceRange -> ErrF
+exErr r m = ErrorString $ "Error at " ++ show r ++ ": " ++ m
+
+-- Somewhat general functions
+
+pairA :: Applicative f => (a -> f c) -> (b -> f d) -> (a, b) -> f (c, d)
+pairA af bf (a, b) = (,) <$> af a <*> bf b
+
+justErr :: MonadError e m => e -> Maybe a -> m a
+justErr _ (Just a) = return a
+justErr err Nothing = throwError err
+
+mapWith :: Ord k => (a -> k) -> [a] -> M.Map k a
+mapWith f = M.fromList . map (\a -> (f a, a))
+
 class Ref r where
   readRef :: (MonadTrans m1, Monad (m1 (ST s)), MonadTrans m2) => r s a -> m2 (m1 (ST s)) a
   writeRef :: (MonadTrans m1, Monad (m1 (ST s)), MonadTrans m2) => r s a -> a -> m2 (m1 (ST s)) ()
@@ -764,41 +801,6 @@ instance Ref TVarRefT where
 instance Ref STRef where
   readRef = lift . lift . readSTRef
   writeRef r = lift . lift . writeSTRef r
-
-withTypeVars :: P.Type -> [String] -> Inferrer s a -> Inferrer s ([Inferred s], a)
-withTypeVars (P.NamedT n ts r) ps i = do
-  when (length ps /= length ts) $ do
-    let errS = "Incorrect usage of named type " ++ n ++ " at " ++ show r ++ ": " ++
-               "wrong number of type arguments, got " ++ show (length ts) ++ ", wanted"
-               ++ show (length ps)
-    throwError $ ErrorString errS
-  ts' <- mapM enter ts
-  prevTypeVars <- typeVars <<%= M.union (M.fromList $ zip ps ts')
-  a <- i
-  typeVars .= prevTypeVars
-  return (ts', a)
-withTypeVars t _ _ = error $ "(Compiler error): Incorrect usage of withTypeVars, " ++ show t ++ " should be a NamedT"
-
-pairA :: Applicative f => (a -> f c) -> (b -> f d) -> (a, b) -> f (c, d)
-pairA af bf (a, b) = (,) <$> af a <*> bf b
-
-justErr :: MonadError e m => e -> Maybe a -> m a
-justErr _ (Just a) = return a
-justErr err Nothing = throwError err
-
--- NOTE: stolen from hydrogen package source (with minor change)
-unionWithM :: (Ord k, Monad m) => (a -> a -> m a) -> M.Map k a -> M.Map k a -> m (M.Map k a)
-unionWithM f a b =
-  liftM M.fromAscList
-    . sequence
-    . fmap (\(k, v) -> liftM (k,) v)
-    . M.toAscList
-    $ M.unionWith f' (M.map return a) (M.map return b)
-  where
-    f' mx my = mx >>= \x -> my >>= \y -> f x y
-
-mapWith :: Ord k => (a -> k) -> [a] -> M.Map k a
-mapWith f = M.fromList . map (\a -> (f a, a))
 
 {-
 Three stage inference:
