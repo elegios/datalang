@@ -1,7 +1,9 @@
-main ()(ret) {
+func main
+-> ret
+-> ret {
   ret = 0
-  mut a : I64 = 4
-  mut bo : = true
+  let mut a : I64 = 4
+  let mut bo = true
   bo = false
   while a < 10 {
     a = a * 2

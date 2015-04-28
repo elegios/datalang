@@ -1,14 +1,24 @@
-main ()(a) {
+func main
+-> a
+-> a {
   a = 0
-  a = other(a)
+  a = ofunc(a)
   if true {
-    other(a)(a)
+    other # a # a
     return
   }
-  other(a)(a)
+  other # a # a
   a = a + 2
 }
 
-other (a)(b) {
+proc other
+a -> a
+a -> b {
+  b = a + 2
+}
+
+func ofunc
+a -> a
+a -> b {
   b = a + 2
 }
