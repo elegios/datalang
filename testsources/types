@@ -22,7 +22,7 @@ func main
 -> ret
 -> ret {
   {
-    let mut tup : Tuple<ret,ret>
+    let mut tup : Tuple
     {
       tup.b = 42
       tup.a = 2

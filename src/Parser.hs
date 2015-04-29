@@ -203,26 +203,23 @@ typeLiteral = simpleTypeLiteral
           <|> structTypeLiteral
 
 simpleTypeLiteral :: Parser Type
-simpleTypeLiteral = uintTypeLiteral <|> withPosition remainingParser
-  where
-    remainingParser = choice $ map (uncurry $ replace reserved) typePairs
-    typePairs = [ ("I8", IntT S8)
-                , ("I16", IntT S16)
-                , ("I32", IntT S32)
-                , ("I64", IntT S64)
-                , ("F32", FloatT S32)
-                , ("F64", FloatT S64)
-                , ("Bool", BoolT)
-                ]
+simpleTypeLiteral = withPosition . choice $ uncurry (replace reserved) <$> typePairs
+  where typePairs = [ ("U8",   UIntT  S8)
+                    , ("U16",  UIntT  S16)
+                    , ("U32",  UIntT  S32)
+                    , ("U64",  UIntT  S64)
 
-uintTypeLiteral :: Parser Type
-uintTypeLiteral = withPosition . choice . map (uncurry $ replace reserved) $ typePairs
-  where
-    typePairs = [ ("U8", UIntT S8)
-                , ("U16", UIntT S16)
-                , ("U32", UIntT S32)
-                , ("U64", UIntT S64)
-                ]
+                    , ("I8",   IntT   S8)
+                    , ("I16",  IntT   S16)
+                    , ("I32",  IntT   S32)
+                    , ("I64",  IntT   S64)
+
+                    , ("F32",  FloatT S32)
+                    , ("F64",  FloatT S64)
+
+                    , ("Bool", BoolT)
+                    , ("_",    UnknownT)
+                    ]
 
 namedTypeLiteral :: Parser Type
 namedTypeLiteral = withPosition $ try typeVar <|> (NamedT <$> identifier <*> tParams)

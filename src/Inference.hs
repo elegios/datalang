@@ -258,6 +258,7 @@ instance Enterable P.Type s (Inferred s) where
   enter (P.StructT ps _) = IStruct <$> mapM (return `pairA` enter) ps
   enter (P.ProcT is os _) = IProc <$> mapM enter is <*> mapM enter os
   enter (P.FuncT is o _) = IFunc <$> mapM enter is <*> enter o
+  enter (P.UnknownT _) = newUnbound NoRestriction
 
 instance Enterable (P.StatementT Resolved) s (IStatement s) where
   enter (P.ProcCall p is os r) = do
@@ -417,12 +418,9 @@ withCallableType d m = do
 
 withTypeVars :: P.Type -> [String] -> Inferrer s a -> Inferrer s ([Inferred s], a)
 withTypeVars (P.NamedT n ts r) ps i = do
-  when (length ps /= length ts) $ do
-    let errS = "Incorrect usage of named type " ++ n ++ " at " ++ show r ++ ": " ++
-               "wrong number of type arguments, got " ++ show (length ts) ++ ", wanted"
-               ++ show (length ps)
-    throwError $ ErrorString errS
-  ts' <- mapM enter ts
+  ts' <- if | null ts -> mapM (const $ newUnbound NoRestriction) ps
+            | length ps /= length ts -> throwError . ErrorString $ "Incorrect usage of named type " ++ n ++ " at " ++ show r ++ ": wrong number of type arguments, got " ++ show (length ts) ++ ", wanted" ++ show (length ps)
+            | otherwise -> mapM enter ts
   prevTypeVars <- typeVars <<%= M.union (M.fromList $ zip ps ts')
   a <- i
   typeVars .= prevTypeVars

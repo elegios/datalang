@@ -65,6 +65,7 @@ data Type = IntT TSize SourceRange
           | StructT [(String, Type)] SourceRange
           | ProcT [Type] [Type] SourceRange
           | FuncT [Type] Type SourceRange
+          | UnknownT SourceRange
           deriving (Show, Eq, Ord)
 
 instance Uniplate Type where
