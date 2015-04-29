@@ -380,11 +380,13 @@ instance EnterableWithType (P.ExpressionT Resolved) s (IExpression s) where
          | o `elem` [Plus, Minus, Times, Divide] -> restrict numErr e1t $ NumR NoSpec
          | o `elem` [BinAnd, BinOr, LShift, LogRShift, AriRShift, Xor] -> restrict uintErr e1t UIntR
          | o `elem` [Lesser, Greater, LE, GE] -> restrict numErr e1t (NumR NoSpec) >> return IBool
+         | o `elem` [ShortAnd, ShortOr, LongAnd, LongOr] -> unify boolErr e1t IBool >> return IBool
     where
       unifyErr m = ErrorString $ "Could not unify expression types around " ++ show o ++ " at " ++ show r ++ ". " ++ m
       numErr m = ErrorString $ "Expressions at " ++ show r ++ " must have a numerical type. " ++ m
       uintErr m = ErrorString $ "Expressions at " ++ show r ++ " must have a uint type. " ++ m
       intErr m = ErrorString $ "Expressions at " ++ show r ++ " must have an int type. " ++ m
+      boolErr m = ErrorString $ "Expressions at " ++ show r ++ " must have type Bool. " ++ m
   enterT (P.Un o e r) = do
     (e', t) <- enterT e
     (Un o e' r,) <$> case o of
