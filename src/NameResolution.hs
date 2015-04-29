@@ -1,14 +1,10 @@
 {-# LANGUAGE TemplateHaskell, TupleSections, LambdaCase #-}
 
-module NameResolution
-( resolveNames
-, Resolved(..)
-, ResolvedSource(..)
-, ErrorMessage(..)
-) where
+module NameResolution (resolveNames) where
 
-import Ast (SourceRange(..), location)
-import Parser hiding (parseFile)
+import GlobalAst (SourceRange(..), location)
+import Parser.Ast
+import NameResolution.Ast
 import Data.Functor ((<$>))
 import Data.List ((\\))
 import Data.Generics.Uniplate.Direct (universe)
@@ -21,31 +17,12 @@ import qualified Data.Map as M
 import qualified Data.Set as S
 import qualified Data.Traversable as T
 
-data Resolved = Local
-                { depth :: Int
-                , name :: String
-                }
-              | Global
-                { name :: String
-                }
-              | ReplacementLocal
-                { member :: Bool
-                , name :: String
-                }
-              | Self
-              deriving (Eq, Ord, Show)
-
-data ResolvedSource = ResolvedSource
-  { types :: M.Map String (TypeDefT Resolved)
-  , callables :: M.Map String (CallableDefT Resolved)
-  }
-
 data ResolverState = ResolverState
   { _currentDepth :: Int
   , _scope :: M.Map String Resolved
   }
 
-data ErrorMessage = ErrorString String | AlreadyReportedError deriving Show
+data ErrorMessage = ErrorString String deriving Show
 
 type Resolver a = StateT ResolverState (ExceptT ErrorMessage Identity) a
 

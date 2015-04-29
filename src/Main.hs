@@ -1,8 +1,10 @@
 module Main where
 
-import Ast (TSize(S32), nowhere)
-import Parser (parseFile, Type(FuncT, IntT))
-import NameResolution (resolveNames, Resolved(Global))
+import GlobalAst (TSize(S32), nowhere)
+import Parser (parseFile)
+import Parser.Ast (Type(FuncT, IntT))
+import NameResolution (resolveNames)
+import NameResolution.Ast (Resolved(Global))
 import Inference (infer)
 import Data.Functor ((<$>))
 import System.Environment (getArgs)

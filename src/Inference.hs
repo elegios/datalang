@@ -2,9 +2,10 @@
 
 module Inference (infer) where
 
-import Ast (SourceRange(..), TSize(..), BinOp(..), UnOp(..), TerminatorType(..), NumSpec(..), location, Source)
-import NameResolution (Resolved(..), ResolvedSource(..))
-import Parser (HiddenIdentifiers)
+import GlobalAst (SourceRange(..), TSize(..), BinOp(..), UnOp(..), NumSpec(..), location)
+import Inference.Ast
+import NameResolution.Ast
+import Parser.Ast (HiddenIdentifiers)
 import Data.Maybe (fromJust, isJust)
 import Data.Functor ((<$>))
 import Data.STRef
@@ -14,7 +15,7 @@ import Control.Monad.ST
 import Control.Monad.State
 import Control.Monad.Except (ExceptT, runExceptT, throwError, MonadError)
 import Control.Lens hiding (op, universe, plate, index)
-import qualified Parser as P
+import qualified Parser.Ast as P
 import qualified Data.Map as M
 import qualified Data.Set as S
 import qualified Data.List as List
@@ -25,46 +26,10 @@ import Debug.Trace
 -- AST types
 
 type ICallableDef s = CallableDefT (Inferred s) (ICompoundAccess s)
-type CallableDef = CallableDefT TypeKey CompoundAccess
-data CallableDefT t a = FuncDef
-                        { callableName :: String
-                        , intypes :: [t]
-                        , outtype :: t
-                        , inargs :: [Resolved]
-                        , outarg :: Resolved
-                        , callableBody :: StatementT t a
-                        , callableRange :: SourceRange
-                        }
-                      | ProcDef
-                        { callableName :: String
-                        , intypes :: [t]
-                        , outtypes :: [t]
-                        , inargs :: [Resolved]
-                        , outargs :: [Resolved]
-                        , callableBody :: StatementT t a
-                        , callableRange :: SourceRange
-                        }
 
 type IStatement s = StatementT (Inferred s) (ICompoundAccess s)
-type Statement = StatementT TypeKey CompoundAccess
-data StatementT t a = ProcCall (ExpressionT t a) [ExpressionT t a] [ExpressionT t a] SourceRange
-                    | Defer (StatementT t a) SourceRange
-                    | ShallowCopy (ExpressionT t a) (ExpressionT t a) SourceRange
-                    | If (ExpressionT t a) (StatementT t a) (Maybe (StatementT t a)) SourceRange
-                    | While (ExpressionT t a) (StatementT t a) SourceRange
-                    | Scope [StatementT t a] SourceRange
-                    | Terminator TerminatorType SourceRange
-                    | VarInit Bool Resolved t (ExpressionT t a) SourceRange
 
 type IExpression s = ExpressionT (Inferred s) (ICompoundAccess s)
-type Expression = ExpressionT TypeKey CompoundAccess
-data ExpressionT t a = Bin BinOp (ExpressionT t a) (ExpressionT t a) SourceRange
-                     | Un UnOp (ExpressionT t a) SourceRange
-                     | CompoundAccess (ExpressionT t a) a SourceRange
-                     | Variable Resolved t SourceRange
-                     | FuncCall (ExpressionT t a) [ExpressionT t a] t SourceRange
-                     | ExprLit (LiteralT t)
-                     deriving Show
 
 type IRepMap s = M.Map Resolved (IExpression s, Inferred s)
 data IAccess s = IMember String | IBracket [Either String (IExpression s, Inferred s)] deriving Show
@@ -76,20 +41,7 @@ data MaybeExpanded s = IUnExpanded (Inferred s) (IAccess s) (Inferred s)
                      | IExpandedSubscript (IExpression s)
                      deriving Show
 
-type RepMap = M.Map Resolved Expression
-data CompoundAccess = Expanded RepMap (Maybe Expression) Expression
-                    | ExpandedMember String
-                    | ExpandedSubscript Expression
-
 type ILiteral s = LiteralT (Inferred s)
-type Literal = LiteralT TypeKey
-data LiteralT t = ILit Integer t SourceRange
-                | FLit Double t SourceRange
-                | BLit Bool SourceRange
-                | Null t SourceRange
-                | Undef t SourceRange
-                | Zero t SourceRange
-                deriving Show
 
 data IRestriction s = NoRestriction
                     | PropertiesR [ICompoundAccess s]
@@ -97,29 +49,15 @@ data IRestriction s = NoRestriction
                     | NumR NumSpec
                     deriving (Show, Eq)
 
-newtype TypeKey = TypeKey { representation :: Int } deriving (Eq, Ord, Show)
-
-data FlatType = IntT TSize
-              | UIntT TSize
-              | FloatT TSize
-              | BoolT
-              | NamedT String [TypeKey]
-              | TypeVar String
-              | PointerT TypeKey
-              | StructT [(String, TypeKey)]
-              | FuncT [TypeKey] TypeKey
-              | ProcT [TypeKey] [TypeKey]
-              deriving (Show, Eq, Ord)
-
-data Replacements s = Replacements
-                     HiddenIdentifiers
-                     (M.Map String (P.Replacement Resolved))
-                     [([P.BracketTokenT Resolved], P.Replacement Resolved)]
+data Replacements = Replacements
+                    HiddenIdentifiers
+                    (M.Map String (P.Replacement Resolved))
+                    [([P.BracketTokenT Resolved], P.Replacement Resolved)]
 data Inferred s = IInt TSize
                 | IUInt TSize
                 | IFloat TSize
                 | IBool
-                | INewType String [Inferred s] (Inferred s) (Replacements s)
+                | INewType String [Inferred s] (Inferred s) Replacements
                 | IPointer (Inferred s)
                 | IStruct [(String, Inferred s)]
                 | IFunc [Inferred s] (Inferred s)
@@ -176,15 +114,12 @@ type RequestT t = (Resolved, t)
 
 -- Basic instances
 
-instance Source (CallableDefT t a) where
-  location = callableRange
-
 instance Show (ICompoundAccess s) where
   show _ = "compoundaccess"
 
-instance Eq (Replacements s) where
+instance Eq Replacements where
   _ == _ = True
-instance Ord (Replacements s) where
+instance Ord Replacements where
   compare _ _ = EQ
 
 instance Show (TVarRefT s a) where
@@ -192,7 +127,7 @@ instance Show (TVarRefT s a) where
 instance Ord (TVarRefT s a) where
   TVarRef i1 _ `compare` TVarRef i2 _ = i1 `compare` i2
 
-instance Show (Replacements s) where
+instance Show Replacements where
   show (Replacements hi ai ps) = "Replacements " ++ show hi ++ " " ++ show (M.keys ai) ++ " " ++ show (fst <$> ps)
 
 makeLenses ''InferrerState

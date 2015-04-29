@@ -4,8 +4,13 @@ alias Tuple3<a> { a : a, b : a }
 
 type Array<i, t> {
   hide ptr
-  [i] | 0 <= i && i < len -> ptr[i]
-  //[s = 0 :: e = len] | 0 <= s && s <= e && e <= len -> e - s //no struct literals nor newtype conversions, so incorrect here
+
+  [i] 0 <= i && i < len
+  -> ptr[i]
+
+  [s = 0 :: e = len] 0 <= s && s <= e && e <= len
+  -> e - s //no struct literals nor newtype conversions, so incorrect here
+
 } {ptr : $t, len : i, cap : i}
 
 type RenameThing {
@@ -54,7 +59,7 @@ func main
     let mut ary : Array<ret, Bool>
     ary.cap = 10
     ary.len = 10
-    // ret = ret + ary[::]
+    ret = ret + ary[::]
   }
   // ret is here 144 (until correct impl of array slicing)
 }

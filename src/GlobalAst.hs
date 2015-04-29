@@ -2,7 +2,7 @@
 
 -- TODO: split into Parser.Ast and Inference.Ast
 
-module Ast where
+module GlobalAst where
 
 import qualified Data.Map as M
 import Data.Functor ((<$>))

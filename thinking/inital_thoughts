@@ -490,3 +490,30 @@ pattern could most definitely be automatically generated, but I'm not
 sure how that mechanic should be implemented. It would be compile time
 runnable, relatively fancy macro expansion. Maybe, but should probably
 be saved for later.
+
+------------------------
+
+points where linebreaks do not break
+- right after a prefix, before the expression
+- right after a binop, before the second expression
+- inside parenthesis -- TODO
+- directly after "=" (in varinit and shallowcopy)
+- after let, before expression
+- after mut, before expression
+- after :, in type assertion
+- in type literal -- TODO
+- after defer, before statement
+
+------------------------
+
+Needed from clang:
+- how C does layout of structs (probably anyway)
+- how a C function declaration translates to IR
+  and what operations are needed to translate to/from it
+
+interface reqs
+- func to init clang
+- func to destruct clang
+- query func for struct layout
+- query func for func layout
+- query func to parse a header and retrieve all decls

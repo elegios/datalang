@@ -4,7 +4,9 @@ func main
   a = 0
   a = ofunc(a)
   if true {
-    other # a # a
+    other
+      # a
+      # a
     return
   }
   other # a # a
