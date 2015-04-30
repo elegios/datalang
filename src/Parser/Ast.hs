@@ -105,6 +105,7 @@ data ExpressionT v = Bin BinOp (ExpressionT v) (ExpressionT v) SourceRange
                    | FuncCall (ExpressionT v) [ExpressionT v] SourceRange
                    | ExprLit (LiteralT v)
                    | TypeAssertion (ExpressionT v) Type SourceRange
+                   | NewTypeConversion (ExpressionT v) String SourceRange
 
 type Literal = LiteralT String
 data LiteralT v = ILit Integer SourceRange
@@ -145,6 +146,7 @@ instance Source (ExpressionT v) where
   location (FuncCall _ _ r) = r
   location (ExprLit l) = location l
   location (TypeAssertion _ _ r) = r
+  location (NewTypeConversion _ _ r) = r
 instance Source (LiteralT v) where
   location (ILit _ r) = r
   location (FLit _ r) = r

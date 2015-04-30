@@ -1,11 +1,11 @@
-{-# LANGUAGE FlexibleContexts, TupleSections, FlexibleInstances, MultiParamTypeClasses #-}
+{-# LANGUAGE FlexibleContexts, TupleSections, FlexibleInstances, MultiParamTypeClasses, LambdaCase #-}
 
 module Parser (parseFile) where
 
 import Parser.Ast
 import GlobalAst (SourceLoc(..), SourceRange(..), TSize(..), BinOp(..), UnOp(..), TerminatorType(..))
 import Data.Functor ((<$>), (<$))
-import Data.Char (isLower)
+import Data.Char (isLower, isUpper)
 import Control.Applicative ((<*>), (<*))
 import Control.Monad.Identity
 import Text.Parsec hiding (runParser)
@@ -33,7 +33,7 @@ langDef = T.LanguageDef
   , T.identLetter = alphaNum <|> char '_'
   , T.opStart = T.opLetter langDef
   , T.opLetter = oneOf "+-*/%<>=!^&|:,"
-  , T.reservedNames = ["defer", "if", "else", "while", "return", "break", "continue", "null", "let", "mut", "func", "proc", "self", "ref"]
+  , T.reservedNames = ["defer", "if", "else", "while", "return", "break", "continue", "null", "let", "mut", "func", "proc", "self", "ref", "to"]
   , T.reservedOpNames =
     [ "-", "^", "&", "!", "*"
     , "/", "%", "+", "-", "<<"
@@ -120,6 +120,7 @@ expressionTable :: [[ExpOp]]
 expressionTable =
   [ [post $ choice [funcCall, memberAccess, subscript]]
   , [pre "-" AriNegate, pre "$" Deref, pre "!" Not]
+  , [post newTypeConversion]
   , [bin "*" Times, bin "/" Divide, bin "%" Remainder]
   , [bin "+" Plus, bin "-" Minus]
   , [bin "<<" LShift, bin ">>" LogRShift, bin ">>>" AriRShift]
@@ -143,6 +144,12 @@ post p = Postfix . chainl1 p . return $ flip (.)
 
 postHelp :: (e -> i -> SourceRange -> e) -> Parser i -> Parser (e -> e)
 postHelp c p = withPosition $ (\i r e -> c e i r) <$> p
+
+newTypeConversion :: Parser (Expression -> Expression)
+newTypeConversion = postHelp NewTypeConversion $ reserved "to" >> newTypeName
+  where newTypeName = identifier >>= \case
+          n@(c:_) | isUpper c -> return n
+          n -> unexpected n
 
 funcCall :: Parser (Expression -> Expression)
 funcCall = postHelp FuncCall . parens $ commaSep expression

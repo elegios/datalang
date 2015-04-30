@@ -11,9 +11,19 @@ type Array<i, t> {
   -> ptr[i]
 
   [s = 0 :: e = len] 0 <= s && s <= e && e <= len
-  -> {ref(ptr[s]), e - s} : SliceA //no newtype conversions, so incorrect here
+  -> { ref(ptr[s]), e - s } to Slice
 
 } { ptr : $t, len : i, cap : i }
+
+type Slice<i, t> {
+  hide ptr
+
+  [i] 0 <= i && i < len
+  -> ptr[i]
+
+  [s = 0 :: e = len] 0 <= s && s <= e && e <= len
+  -> { ref(ptr[s]), e - s } to Slice
+} { ptr : $t, len : i }
 
 type RenameThing {
   hide a
@@ -61,7 +71,7 @@ func main
     let mut ary : Array<ret, Bool>
     ary.cap = 10
     ary.len = 10
-    ret = ret + ary[::].len
+    ret = ret + ary[::][::].len
   }
   // ret is here 144
 }

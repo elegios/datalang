@@ -118,6 +118,8 @@ instance Resolvable ExpressionT where
     MemberAccess <$> resolve e <*> return m <*> return r -- TODO: more fancy when modules are a thing
   resolve (Subscript e bs r) =
     Subscript <$> resolve e <*> mapM (T.mapM resolve) bs <*> return r
+  resolve (NewTypeConversion e n r) =
+    NewTypeConversion <$> resolve e <*> return n <*> return r
   resolve (Variable n r) =
     Variable <$> (use (scope . at n) >>= justErr err) <*> return r
     where err = ErrorString $ "Unknown variable " ++ n ++ " at " ++ show r

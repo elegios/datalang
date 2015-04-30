@@ -404,6 +404,17 @@ instance EnterableWithType (P.ExpressionT Resolved) s (IExpression s) where
     enter t >>= unify errF et
     return (e', et)
     where errF m = ErrorString $ "Failed type assertion at " ++ show r ++ ": " ++ m
+  enterT (P.NewTypeConversion e t r) = do
+    t'@(INewType _ _ w _) <- enter (P.NamedT t [] r) >>= findNewType
+    (e', et) <- enterT e
+    unify errF w et
+    return (e', t')
+    where errF m = ErrorString $ t ++ " cannot wrap the expression at " ++ show (location e) ++ ": " ++ m
+          findNewType t'@INewType{} = return t'
+          findNewType (IRef ref) = readRef ref >>= \case
+            Link t' -> findNewType t'
+            u@Unbound{} -> error $ "compiler error findNewType " ++ show u
+          findNewType t' = error $ "compiler error findNewType " ++ show t'
 
 instance EnterableWithType (P.LiteralT Resolved) s (ILiteral s) where
   enterT (P.ILit i r) = litF (ILit i) r $ numRestr NoNew NoSpec
