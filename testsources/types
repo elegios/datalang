@@ -2,6 +2,8 @@ alias Tuple<a, b> { a : a, b : b }
 type Tuple2<a, b> {} { a : a, b : b }
 alias Tuple3<a> { a : a, b : a }
 
+alias SliceA<i, t> { ptr : $t, len : i }
+
 type Array<i, t> {
   hide ptr
 
@@ -9,9 +11,9 @@ type Array<i, t> {
   -> ptr[i]
 
   [s = 0 :: e = len] 0 <= s && s <= e && e <= len
-  -> e - s //no struct literals nor newtype conversions, so incorrect here
+  -> {ref(ptr[s]), e - s} : SliceA //no newtype conversions, so incorrect here
 
-} {ptr : $t, len : i, cap : i}
+} { ptr : $t, len : i, cap : i }
 
 type RenameThing {
   hide a
@@ -59,7 +61,7 @@ func main
     let mut ary : Array<ret, Bool>
     ary.cap = 10
     ary.len = 10
-    ret = ret + ary[::]
+    ret = ret + ary[::].len
   }
-  // ret is here 144 (until correct impl of array slicing)
+  // ret is here 144
 }

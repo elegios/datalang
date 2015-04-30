@@ -517,3 +517,35 @@ interface reqs
 - query func for struct layout
 - query func for func layout
 - query func to parse a header and retrieve all decls
+
+------------------------
+
+IRequirements, things that need to be represented:
+
+structliteral with names: something with at least the specified (name, type) tuples
+supports memberaccess (including not previously specified names)
+is not numerical
+is not a newtype
+
+structliteral without names: something with exactly as many (name, type) tuples, but without information about name
+supports memberaccess (exactly as many different as tuples, but that's probably overkill)
+is not numerical
+is not a newtype
+
+unary negation requires numbers to be signed
+bitwise ops require numbers to be integral (possibly unsigned)
+float literals require numbers to be floating
+
+a newtype on a numerical type inherits the same numerical-ness, thus a newtype must support a numerical requirement
+note that this probably merits a way to hide the numerical-ness, to provide an opaque datatype that happens to be backed by a number
+maybe just let "hide *" do this
+
+{ mayBeNewType : Bool, numSpec : NumSpec, accesses : [MemberAccess], structTuple : Maybe [Type] }
+NumSpec = NoSpec | NotNumerical | Signed | Floating | Integral | IntegralSigned | IntegralUnsigned
+                                                                               -- not sure about this one
+
+numerical -> not structliteral
+structliteral -> not numerical, not newtype
+any kind of literal -> not newtype
+
+eventually these may need to express "can cast/convert from/to", unless a better mechanism is implmented for that

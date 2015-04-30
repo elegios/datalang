@@ -2,11 +2,11 @@
 
 module Inference (infer) where
 
-import GlobalAst (SourceRange(..), TSize(..), BinOp(..), UnOp(..), NumSpec(..), location)
-import Inference.Ast
+import GlobalAst (SourceRange(..), TSize(..), BinOp(..), UnOp(..), location)
+import Inference.Ast hiding (Literal(..))
 import NameResolution.Ast
 import Parser.Ast (HiddenIdentifiers)
-import Data.Maybe (fromJust, isJust)
+import Data.Maybe (fromJust, isJust, isNothing, fromMaybe)
 import Data.Functor ((<$>))
 import Data.STRef
 import Data.Generics.Uniplate.Direct
@@ -15,6 +15,7 @@ import Control.Monad.ST
 import Control.Monad.State
 import Control.Monad.Except (ExceptT, runExceptT, throwError, MonadError)
 import Control.Lens hiding (op, universe, plate, index)
+import qualified Inference.Ast as I
 import qualified Parser.Ast as P
 import qualified Data.Map as M
 import qualified Data.Set as S
@@ -25,11 +26,21 @@ import Debug.Trace
 
 -- AST types
 
-type ICallableDef s = CallableDefT (Inferred s) (ICompoundAccess s)
+type ICallableDef s = CallableDefT (Inferred s) (ICompoundAccess s) (ILiteral s)
 
-type IStatement s = StatementT (Inferred s) (ICompoundAccess s)
+type IStatement s = StatementT (Inferred s) (ICompoundAccess s) (ILiteral s)
 
-type IExpression s = ExpressionT (Inferred s) (ICompoundAccess s)
+type IExpression s = ExpressionT (Inferred s) (ICompoundAccess s) (ILiteral s)
+
+data ILiteral s = ILit Integer (Inferred s) SourceRange
+                | FLit Double (Inferred s) SourceRange
+                | BLit Bool SourceRange
+                | Null (Inferred s) SourceRange
+                | Undef (Inferred s) SourceRange
+                | Zero (Inferred s) SourceRange
+                | StructLit (M.Map String (IExpression s)) (Inferred s) SourceRange
+                | StructTupleLit [IExpression s] (Inferred s) SourceRange
+                deriving Show
 
 type IRepMap s = M.Map Resolved (IExpression s, Inferred s)
 data IAccess s = IMember String | IBracket [Either String (IExpression s, Inferred s)] deriving Show
@@ -41,13 +52,31 @@ data MaybeExpanded s = IUnExpanded (Inferred s) (IAccess s) (Inferred s)
                      | IExpandedSubscript (IExpression s)
                      deriving Show
 
-type ILiteral s = LiteralT (Inferred s)
-
-data IRestriction s = NoRestriction
-                    | PropertiesR [ICompoundAccess s]
-                    | UIntR
-                    | NumR NumSpec
+data IRestriction s = IRestriction MayBeNewType [ICompoundAccess s] (RestrKind s)
                     deriving (Show, Eq)
+data RestrKind s = NoRestrKind
+                 | StructKind (M.Map String (Inferred s)) (Maybe [Inferred s])
+                 | NumKind NumSpec
+                 deriving (Show, Eq)
+
+data NumSpec = NoSpec | SignSpec | FloatSpec | IntSpec | IntSignSpec | UIntSpec deriving (Show, Eq, Ord) -- NOTE: order is very important, don't move without changing applyRestriction
+
+noRestriction :: IRestriction s
+noRestriction = IRestriction MayNew [] NoRestrKind
+
+structTupleRestr :: [Inferred s] -> IRestriction s
+structTupleRestr = IRestriction NoNew [] . StructKind M.empty . Just
+
+structRestr :: M.Map String (Inferred s) -> IRestriction s
+structRestr = IRestriction NoNew [] . flip StructKind Nothing
+
+numRestr :: MayBeNewType -> NumSpec -> IRestriction s
+numRestr nt = IRestriction nt [] . NumKind
+
+accessRestr :: ICompoundAccess s -> IRestriction s
+accessRestr a = IRestriction MayNew [a] NoRestrKind
+
+data MayBeNewType = NoNew | MayNew deriving (Show, Eq)
 
 data Replacements = Replacements
                     HiddenIdentifiers
@@ -186,7 +215,7 @@ infer (ResolvedSource tDefs cDefs) requests = runST $ flip evalStateT initSuperS
                 rid' = _refId st
             (Right (def'', _flatTypes finSt'):) <$> inferRequest rid' finSt' next
           where
-            exiter = (,) <$> exit def' <*> mapM (return `pairA` convertType undefined) (_requestedGlobals st)
+            exiter = (,) <$> exit def' <*> mapM (rightA $ convertType undefined) (_requestedGlobals st)
       where
         ((req@(Global fn, t), path), rest) = M.deleteFindMin todo
         infmap = _toInferred finSt
@@ -233,7 +262,7 @@ instance Enterable P.Type s (Inferred s) where
   enter nt@(P.NamedT n _ sr) = use (enteredNames . at nt) >>= maybe construct return
     where
       construct = do
-        IRef r <- newUnbound NoRestriction
+        IRef r <- newUnbound noRestriction
         enteredNames . at nt ?= IRef r
         t <- use (typeDefs . at n) >>= \case -- TODO: move unknown to nameresolution
           Nothing -> throwError . ErrorString $ "Unknown type name " ++ n ++ " at " ++ show sr
@@ -252,13 +281,13 @@ instance Enterable P.Type s (Inferred s) where
   enter (P.TypeVar n r) = use (typeVars . at n) >>= \case
     Just t -> return t
     Nothing -> use defineTypeVars >>= \case
-      True -> newUnbound NoRestriction >>= (typeVars . at n <?=)
+      True -> newUnbound noRestriction >>= (typeVars . at n <?=)
       False -> throwError . ErrorString $ "Unknown type variable " ++ n ++ " at " ++ show r
   enter (P.PointerT t _) = IPointer <$> enter t
-  enter (P.StructT ps _) = IStruct <$> mapM (return `pairA` enter) ps
+  enter (P.StructT ps _) = IStruct <$> mapM (rightA enter) ps
   enter (P.ProcT is os _) = IProc <$> mapM enter is <*> mapM enter os
   enter (P.FuncT is o _) = IFunc <$> mapM enter is <*> enter o
-  enter (P.UnknownT _) = newUnbound NoRestriction
+  enter (P.UnknownT _) = newUnbound noRestriction
 
 instance Enterable (P.StatementT Resolved) s (IStatement s) where
   enter (P.ProcCall p is os r) = do
@@ -293,7 +322,7 @@ instance Enterable (P.StatementT Resolved) s (IStatement s) where
     (e', t') <- T.mapM enterT me >>= \case
       Just (e, et) -> T.mapM (enter >=> unify errF et) mt >> return (e, et)
       Nothing -> do
-        u <- newUnbound NoRestriction
+        u <- newUnbound noRestriction
         t' <- justErr internal mt >>= enter
         unify errF u t'
         return (ExprLit $ Zero u r, t')
@@ -311,11 +340,11 @@ instance EnterableWithType (P.ExpressionT Resolved) s (IExpression s) where
     (e2', e2t) <- enterT e2
     unify unifyErr e1t e2t
     (Bin o e1' e2' r,) <$>
-      if | o == Remainder -> restrict intErr e1t $ NumR IntSpec
+      if | o == Remainder -> restrict intErr e1t $ numRestr MayNew IntSpec
          | o `elem` [Equal, NotEqual] -> return IBool
-         | o `elem` [Plus, Minus, Times, Divide] -> restrict numErr e1t $ NumR NoSpec
-         | o `elem` [BinAnd, BinOr, LShift, LogRShift, AriRShift, Xor] -> restrict uintErr e1t UIntR
-         | o `elem` [Lesser, Greater, LE, GE] -> restrict numErr e1t (NumR NoSpec) >> return IBool
+         | o `elem` [Plus, Minus, Times, Divide] -> restrict numErr e1t $ numRestr MayNew NoSpec
+         | o `elem` [BinAnd, BinOr, LShift, LogRShift, AriRShift, Xor] -> restrict uintErr e1t $ numRestr MayNew UIntSpec
+         | o `elem` [Lesser, Greater, LE, GE] -> restrict numErr e1t (numRestr MayNew NoSpec) >> return IBool
          | o `elem` [ShortAnd, ShortOr, LongAnd, LongOr] -> unify boolErr e1t IBool >> return IBool
     where
       unifyErr m = ErrorString $ "Could not unify expression types around " ++ show o ++ " at " ++ show r ++ ". " ++ m
@@ -327,9 +356,9 @@ instance EnterableWithType (P.ExpressionT Resolved) s (IExpression s) where
     (e', t) <- enterT e
     (Un o e' r,) <$> case o of
       Deref -> derefPtr ptrErr t
-      AddressOf -> return $ IPointer t
-      AriNegate -> restrict numErr t $ NumR NoSpec
-      BinNegate -> restrict uintErr t UIntR
+      AddressOf -> return $ IPointer t -- TODO: only allow when a pointer is available
+      AriNegate -> restrict numErr t $ numRestr MayNew SignSpec
+      BinNegate -> restrict uintErr t $ numRestr MayNew UIntSpec
       Not -> unify boolErr t IBool >> return IBool
     where
       ptrErr = mustBeA "pointer"
@@ -376,14 +405,23 @@ instance EnterableWithType (P.ExpressionT Resolved) s (IExpression s) where
     return (e', et)
     where errF m = ErrorString $ "Failed type assertion at " ++ show r ++ ": " ++ m
 
-instance EnterableWithType P.Literal s (ILiteral s) where
-  enterT (P.ILit i r) = litF (ILit i) r $ NumR NoSpec -- BUG: no uint literals
-  enterT (P.FLit f r) = litF (FLit f) r $ NumR FloatSpec
+instance EnterableWithType (P.LiteralT Resolved) s (ILiteral s) where
+  enterT (P.ILit i r) = litF (ILit i) r $ numRestr NoNew NoSpec
+  enterT (P.FLit f r) = litF (FLit f) r $ numRestr NoNew FloatSpec
   enterT (P.BLit b r) = return (BLit b r, IBool)
   enterT (P.Null r) = do
-    u <- newUnbound NoRestriction
+    u <- newUnbound noRestriction
     return (Null (IPointer u) r, IPointer u)
-  enterT (P.Undef r) = litF Undef r NoRestriction
+  enterT (P.Undef r) = litF Undef r noRestriction
+  enterT (P.StructLit ps r) = do
+    let (psNames, psExprs) = unzip ps
+        tom = M.fromList . zip psNames
+    (psExprs', psTs) <- unzip <$> mapM enterT psExprs
+    litF (StructLit $ tom psExprs') r . structRestr $ tom psTs
+  enterT (P.StructTupleLit [] r) = return (StructTupleLit [] (IStruct []) r, IStruct [])
+  enterT (P.StructTupleLit ps r) = do
+    (psExprs, psTs) <- unzip <$> mapM enterT ps
+    litF (StructTupleLit psExprs) r $ structTupleRestr psTs
 
 litF :: (Inferred s -> SourceRange -> ILiteral s) -> SourceRange -> IRestriction s -> Inferrer s (ILiteral s, Inferred s)
 litF constr r restr = newUnbound restr >>= (\t -> return (constr t r, t))
@@ -392,9 +430,9 @@ litF constr r restr = newUnbound restr >>= (\t -> return (constr t r, t))
 
 newICompound :: ErrF -> Inferred s -> IAccess s -> Inferrer s (ICompoundAccess s, Inferred s)
 newICompound errF t a = do
-  u <- newUnbound NoRestriction
+  u <- newUnbound noRestriction
   ca <- lift . lift $ newSTRef (IUnExpanded t a u)
-  restrict errF t $ PropertiesR [ca]
+  restrict errF t $ accessRestr ca
   return (ca, u)
 
 createCallableType :: P.CallableDefT v -> Inferrer s (Inferred s)
@@ -410,7 +448,7 @@ withCallableType d m = do
   prevTypeVars <- typeVars <<%= M.union newTypeVars
   m <* (typeVars .= prevTypeVars)
   where
-    makeVar n = (n,) <$> newUnbound NoRestriction
+    makeVar n = (n,) <$> newUnbound noRestriction
     typevars = [n | P.TypeVar n _ <- universeBi ts]
     ts = case d of
       P.FuncDef{P.intypes = its, P.outtype = ot} -> ot : its
@@ -418,7 +456,7 @@ withCallableType d m = do
 
 withTypeVars :: P.Type -> [String] -> Inferrer s a -> Inferrer s ([Inferred s], a)
 withTypeVars (P.NamedT n ts r) ps i = do
-  ts' <- if | null ts -> mapM (const $ newUnbound NoRestriction) ps
+  ts' <- if | null ts -> mapM (const $ newUnbound noRestriction) ps
             | length ps /= length ts -> throwError . ErrorString $ "Incorrect usage of named type " ++ n ++ " at " ++ show r ++ ": wrong number of type arguments, got " ++ show (length ts) ++ ", wanted" ++ show (length ps)
             | otherwise -> mapM enter ts
   prevTypeVars <- typeVars <<%= M.union (M.fromList $ zip ps ts')
@@ -437,8 +475,8 @@ getFuncReturn errF (IFunc is ret) newIs
   | otherwise = throwError . errF $ "Got an incorrect number of arguments, got " ++
                 show (length newIs) ++ ", wanted " ++ show (length is)
 getFuncReturn errF (IRef r) is = readRef r >>= \case
-  Unbound NoRestriction -> do
-    u <- newUnbound NoRestriction
+  Unbound restr | restr == noRestriction -> do
+    u <- newUnbound noRestriction
     writeRef r . Link $ IFunc is u
     return u
   Link t -> getFuncReturn errF t is
@@ -448,8 +486,8 @@ getFuncReturn errF u _ = throwError . errF $ show u ++ " cannot be a func"
 derefPtr :: ErrF -> Inferred s -> Inferrer s (Inferred s)
 derefPtr _ (IPointer t) = return t
 derefPtr errF (IRef r) = readRef r >>= \case
-  Unbound NoRestriction -> do
-    u <- newUnbound NoRestriction
+  Unbound restr | restr == noRestriction -> do
+    u <- newUnbound noRestriction
     writeRef r . Link $ IPointer u
     return u
   Link t -> derefPtr errF t
@@ -497,52 +535,89 @@ restrict errF t restr = applyRestriction errF t restr >> return t
 
 applyRestriction :: ErrF -> Inferred s -> IRestriction s -> Inferrer s ()
 
-applyRestriction _ _ NoRestriction = return ()
+applyRestriction _ _ restr | restr == noRestriction = return ()
 
-applyRestriction errF INewType{} (PropertiesR expands) =
-  mapM_ (attemptCompoundExpand errF) expands
+applyRestriction errF (INewType _ _ w (Replacements P.HideSome{} _ _)) (IRestriction MayNew as (NumKind spec)) = do
+  applyRestriction errF w $ numRestr MayNew spec
+  mapM_ (attemptCompoundExpand errF) as
 
-applyRestriction errF t@(IRef r) restr = readRef r >>= \case
+applyRestriction errF INewType{} (IRestriction MayNew as NoRestrKind) =
+  mapM_ (attemptCompoundExpand errF) as
+
+applyRestriction errF (IRef r) restr@(IRestriction nt' as' k') = readRef r >>= \case
   Link i -> applyRestriction errF i restr
   Unbound restr' | restr == restr' -> return ()
-  Unbound NoRestriction -> writeRef r $ Unbound restr
-  u@(Unbound (NumR spec)) -> case restr of
-    NumR NoSpec -> return ()
-    NumR spec' | spec == spec' -> return ()
-    NumR _ | spec == NoSpec -> writeRef r $ Unbound restr
-    _ -> throwError . errF $ "Could not apply restriction " ++ show restr ++ " on type " ++ show t ++ " (" ++ show u ++ ")"
-  u@(Unbound (PropertiesR origExpands)) -> case restr of
-    PropertiesR restrExpands ->
-      writeRef r . Unbound . PropertiesR . List.nub $ origExpands ++ restrExpands
-    _ -> throwError . errF $ "Could not apply restriction " ++ show restr ++ " on type " ++ show t ++ " (" ++ show u ++ ")"
-  u -> throwError . errF $ "Could not apply restriction " ++ show restr ++ " on type " ++ show t ++ " (" ++ show u ++ ")"
+  Unbound restr' | restr' == noRestriction -> writeRef r $ Unbound restr
+  Unbound (IRestriction nt as k) -> do
+    let newNt = mayNTOr nt nt'
+        newAs = List.nub $ as ++ as'
+    newK <- case (k, k') of
+      (_, NoRestrKind) -> return k
+      (NumKind spec, NumKind spec') -> NumKind <$> numSpecOr spec spec'
+      (StructKind ms ps, StructKind ms' ps')
+        | isNothing ps || isNothing ps' || fmap length ps == fmap length ps'
+          -> do
+            fromMaybe (return ()) $ zipWithM_ (unify errF) <$> ps <*> ps'
+            StructKind
+              <$> unionWithM (\a b -> unify errF a b >> return a) ms ms'
+              <*> return (mplus ps ps')
+      _ -> throwError . errF $ "Incompatible restriction kinds: " ++ show k ++ " != " ++ show k'
+    writeRef r . Unbound $ IRestriction newNt newAs newK
+  where mayNTOr MayNew MayNew = MayNew
+        mayNTOr _ _ = NoNew
+        numSpecOr spec spec'
+          | s == [SignSpec, IntSpec] = return IntSignSpec
+          | s1 == FloatSpec && s2 > FloatSpec = err
+          | s == [IntSignSpec, UIntSpec] = err
+          | s == [SignSpec, UIntSpec] = err
+          | otherwise = return $ max spec spec'
+          where s@[s1,s2] = List.sort [spec, spec']
+                err = throwError . errF $ show spec ++ " and " ++ show spec' ++ " are incompatible"
 
-applyRestriction _ IUInt{} UIntR = return ()
+applyRestriction _ IUInt{} (IRestriction _ [] (NumKind spec))
+  | spec `elem` [NoSpec, IntSpec, UIntSpec] = return ()
 
-applyRestriction _ IInt{} (NumR spec)
-  | spec `elem` [NoSpec, IntSpec] = return ()
-applyRestriction _ IFloat{} (NumR spec)
-  | spec `elem` [NoSpec, FloatSpec] = return ()
+applyRestriction _ IInt{} (IRestriction _ [] (NumKind spec))
+  | spec `elem` [NoSpec, SignSpec, IntSpec, IntSignSpec] = return ()
 
-applyRestriction errF IPointer{} (PropertiesR expands) =
-  mapM_ (attemptCompoundExpand errF) expands
+applyRestriction _ IFloat{} (IRestriction _ [] (NumKind spec))
+  | spec `elem` [NoSpec, SignSpec, FloatSpec] = return ()
 
-applyRestriction errF IStruct{} (PropertiesR expands) =
-  mapM_ (attemptCompoundExpand errF) expands
+applyRestriction errF IPointer{} (IRestriction _ as NoRestrKind) =
+  mapM_ (attemptCompoundExpand errF) as
+
+applyRestriction errF t@(IStruct ps) (IRestriction _ as k)
+  | not $ isNumKind k = do
+      mapM_ (attemptCompoundExpand errF) as
+      case k of
+        NoRestrKind -> return ()
+        StructKind ms ps' | isNothing ps' || length (fromJust ps') == length ps -> do
+          forM_ (M.toList ms) $ \(m, mt') -> case lookup m ps of
+            Just mt -> unify errF mt' mt
+            Nothing -> throwError . errF $ show t ++ " lacks member " ++ m
+          fromMaybe (return ()) $ zipWithM_ (unify errF) (snd <$> ps) <$> ps'
+  where isNumKind NumKind{} = True
+        isNumKind _ = False
 
 applyRestriction errF t restr = throwError . errF $ "Could not apply restriction " ++ show restr ++ " on type " ++ show t
 
+-- TODO: allow type parameters in a newtype to be used inside expansions
 attemptCompoundExpand :: ErrF -> ICompoundAccess s -> Inferrer s ()
 attemptCompoundExpand errF r = readRef r >>= \case
   IUnExpanded t (IMember m) retty -> memberAccess t
     where
       memberAccess = readTillNonPointer >=> \case
-        Nothing -> return ()
-        Just (IStruct ps) | isJust mT -> do
+        Left (Unbound (IRestriction _ _ (StructKind ms _)))
+          | isJust msRetty -> do
+            unify errF retty $ fromJust msRetty
+            writeRef r $ IExpandedMember m
+          where msRetty = M.lookup m ms
+        Left _ -> return ()
+        Right (IStruct ps) | isJust mT -> do
           unify errF retty $ fromJust mT
           writeRef r $ IExpandedMember m
           where mT = List.lookup m ps
-        Just u@(INewType _ _ w (Replacements hi ai _)) -> case M.lookup m ai of
+        Right u@(INewType _ _ w (Replacements hi ai _)) -> case M.lookup m ai of
           Nothing -> case hi of
             P.HideSome hidden | m `notElem` hidden -> memberAccess w
             _ -> throwError . errF $ show u ++ " has no member " ++ m
@@ -550,13 +625,13 @@ attemptCompoundExpand errF r = readRef r >>= \case
             prevReplacementContext <- replacementContext <<.= w
             expand retty rep M.empty
             replacementContext .= prevReplacementContext
-        Just u -> throwError . errF $ show u ++ " has no member " ++ m
+        Right u -> throwError . errF $ show u ++ " has no member " ++ m
   IUnExpanded t (IBracket bp) retty ->
     readTillType t >>= \case
       Nothing -> return ()
       Just (IPointer it) -> case bp of
         [Right (e, intT)] -> do
-          restrict errF intT (NumR IntSpec)
+          restrict errF intT $ numRestr MayNew IntSpec
           unify errF retty it
           writeRef r $ IExpandedSubscript e
         _ -> throwError . errF $ "A pointer only supports [int]"
@@ -592,9 +667,9 @@ attemptCompoundExpand errF r = readRef r >>= \case
     readTillType t = return $ Just t
     readTillNonPointer (IRef tref) = readRef tref >>= \case
       Link t -> readTillNonPointer t
-      _ -> return Nothing
+      u -> return $ Left u
     readTillNonPointer (IPointer t) = readTillNonPointer t
-    readTillNonPointer t = return $ Just t
+    readTillNonPointer t = return $ Right t
 
 -- Finalizer phase
 
@@ -624,7 +699,7 @@ convertType errF = inner
           flatTypes . at tk ?= ft
           return tk
     inner i@(IPointer it) = inner it >>= create i . PointerT
-    inner i@(IStruct ps) = mapM (return `pairA` inner) ps >>= create i . StructT
+    inner i@(IStruct ps) = mapM (rightA inner) ps >>= create i . StructT
     inner i@(IFunc is o) = (FuncT <$> mapM inner is <*> inner o) >>= create i
     inner i@(IProc is os) = (ProcT <$> mapM inner is <*> mapM inner os) >>= create i
     inner (IRef r) = readBottom r >>= \case
@@ -683,21 +758,32 @@ instance Finalizable (IExpression s) s Expression where
     FuncCall <$> exit f <*> mapM exit as <*> convertType (exErr r) ret <*> return r
   exit (ExprLit l) = ExprLit <$> exit l
 
-instance Finalizable (ILiteral s) s Literal where
-  exit (ILit i t r) = ILit i <$> convertType (exErr r) t <*> return r
-  exit (FLit d t r) = FLit d <$> convertType (exErr r) t <*> return r
-  exit (BLit b r) = return $ BLit b r
-  exit (Null t r) = Null <$> convertType (exErr r) t <*> return r
-  exit (Undef t r) = Undef <$> convertType (exErr r) t <*> return r
-  exit (Zero t r) = Zero <$> convertType (exErr r) t <*> return r
+instance Finalizable (ILiteral s) s I.Literal where
+  exit (ILit i t r) = I.ILit i <$> convertType (exErr r) t <*> return r
+  exit (FLit d t r) = I.FLit d <$> convertType (exErr r) t <*> return r
+  exit (BLit b r) = return $ I.BLit b r
+  exit (Null t r) = I.Null <$> convertType (exErr r) t <*> return r
+  exit (Undef t r) = I.Undef <$> convertType (exErr r) t <*> return r
+  exit (Zero t r) = I.Zero <$> convertType (exErr r) t <*> return r
+  exit (StructLit ms t r) = do
+    t' <- convertType (exErr r) t
+    StructT ps <- fmap fromJust . use $ flatTypes . at t'
+    ps' <- forM ps $ \(p, pt) -> case M.lookup p ms of
+      Just me -> exit me
+      Nothing -> return . ExprLit $ I.Zero pt r
+    return $ I.StructLit (zip (fst <$> ps) ps') t' r
+  exit (StructTupleLit ps t r) = do
+    t' <- convertType (exErr r) t
+    StructT ps' <- fmap fromJust . use $ flatTypes . at t'
+    I.StructLit <$> (zip (fst <$> ps') <$> mapM exit ps) <*> return t' <*> return r
 
 exErr :: SourceRange -> ErrF
 exErr r m = ErrorString $ "Error at " ++ show r ++ ": " ++ m
 
 -- Somewhat general functions
 
-pairA :: Applicative f => (a -> f c) -> (b -> f d) -> (a, b) -> f (c, d)
-pairA af bf (a, b) = (,) <$> af a <*> bf b
+rightA :: Applicative f => (b -> f c) -> (a, b) -> f (a, c)
+rightA f (a, b) = (a,) <$> f b
 
 justErr :: MonadError e m => e -> Maybe a -> m a
 justErr _ (Just a) = return a
@@ -717,9 +803,19 @@ instance Ref STRef where
   readRef = lift . lift . readSTRef
   writeRef r = lift . lift . writeSTRef r
 
+--- NOTE: stolen from hydrogen package source (with minor change)
+unionWithM :: (Ord k, Monad m) => (a -> a -> m a) -> M.Map k a -> M.Map k a -> m (M.Map k a)
+unionWithM f a b =
+  liftM M.fromAscList
+    . sequence
+    . fmap (\(k, v) -> liftM (k,) v)
+    . M.toAscList
+    $ M.unionWith f' (M.map return a) (M.map return b)
+  where
+    f' mx my = mx >>= \x -> my >>= \y -> f x y
+
 {-
-Three stage inference:
-1. enter: convert to Inferred, ICompoundAccess and InferredSource, store unexpanded newtype replacements
-2. expand: try to iteratively expand all unexpanded newtype replacements until fixpoint. If fixpoint has remaining unexpanded things, error out.
-3. exit: convert to FlatType and CompoundAccess, generate new types (TypeKey) basically everywhere to keep all types non-cyclic (use a M.Map FlatType TypeKey inside a new monad with state and except)
+Two stage inference:
+1. enter: convert to Inferred, ICompoundAccess and InferredSource
+2. exit: convert to FlatType and CompoundAccess, generate new types (TypeKey) basically everywhere to keep all types non-cyclic (use a M.Map FlatType TypeKey inside a new monad with state and except)
 -}

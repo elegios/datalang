@@ -174,9 +174,16 @@ exprLit = ExprLit <$> withPosition variants
                <|> replace reserved "null" Null
                <|> replace reserved "_" Undef
                <|> numLit
+               <|> structLit
 
 numLit :: Parser (SourceRange -> Literal)
 numLit = either ILit FLit <$> naturalOrFloat
+
+structLit :: Parser (SourceRange -> Literal)
+structLit = braces $ try lit <|> tupLit
+  where
+    tupLit = StructTupleLit <$> commaSep expression
+    lit = fmap StructLit . commaSep1 $ (,) <$> identifier <* cont <* symbol "=" <*> expression <* cont
 
 typeDef :: Parser TypeDef
 typeDef = withPosition $ newType <|> alias

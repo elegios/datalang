@@ -9,7 +9,7 @@ import Data.Functor ((<$>))
 import Data.List ((\\))
 import Data.Generics.Uniplate.Direct (universe)
 import Control.Lens hiding (both, universe)
-import Control.Applicative ((<*>))
+import Control.Applicative (Applicative, (<*>))
 import Control.Monad (zipWithM_)
 import Control.Monad.State (evalStateT, StateT, get, put)
 import Control.Monad.Except (runExceptT, ExceptT, MonadError, throwError)
@@ -112,7 +112,7 @@ instance Resolvable ExpressionT where
   resolve (Bin o e1 e2 r) = Bin o <$> resolve e1 <*> resolve e2 <*> return r
   resolve (Un o e r) = Un o <$> resolve e <*> return r
   resolve (FuncCall c i r) = FuncCall <$> resolve c <*> mapM resolve i <*> return r
-  resolve (ExprLit l) = return $ ExprLit l
+  resolve (ExprLit l) = ExprLit <$> resolve l
   resolve (TypeAssertion e t r) = TypeAssertion <$> resolve e <*> return t <*> return r
   resolve (MemberAccess e m r) =
     MemberAccess <$> resolve e <*> return m <*> return r -- TODO: more fancy when modules are a thing
@@ -122,8 +122,19 @@ instance Resolvable ExpressionT where
     Variable <$> (use (scope . at n) >>= justErr err) <*> return r
     where err = ErrorString $ "Unknown variable " ++ n ++ " at " ++ show r
 
+instance Resolvable LiteralT where
+  resolve (ILit i r) = return $ ILit i r
+  resolve (FLit f r) = return $ FLit f r
+  resolve (BLit b r) = return $ BLit b r
+  resolve (Null r) = return $ Null r
+  resolve (Undef r) = return $ Undef r
+  resolve (StructLit ps r) = flip StructLit r <$> mapM (rightA resolve) ps
+  resolve (StructTupleLit ps r) = flip StructTupleLit r <$> mapM resolve ps
+
 class Resolvable r where
   resolve :: r String -> Resolver (r Resolved)
+
+-- Type resolving
 
 resolveTypeDef :: M.Map String (TypeDefT String) -> TypeDefT String -> Resolver (TypeDefT Resolved)
 resolveTypeDef _ (Alias tn tp w r) = return $ Alias tn tp w r
@@ -211,6 +222,11 @@ typeGraph defs = defs >>= \d -> zip (repeat (typeName d, location d)) $ deps d
     innerDeps (StructT ps _) = concatMap innerDeps $ snd <$> ps
     innerDeps _ = []
 
+-- Somewhat general functions
+
 justErr :: MonadError e m => e -> Maybe a -> m a
 justErr _ (Just a) = return a
 justErr err Nothing = throwError err
+
+rightA :: Applicative f => (b -> f c) -> (a, b) -> f (a, c)
+rightA f (a, b) = (a,) <$> f b

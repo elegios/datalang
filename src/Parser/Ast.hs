@@ -103,14 +103,17 @@ data ExpressionT v = Bin BinOp (ExpressionT v) (ExpressionT v) SourceRange
                    | Subscript (ExpressionT v) [Either String (ExpressionT v)] SourceRange
                    | Variable v SourceRange
                    | FuncCall (ExpressionT v) [ExpressionT v] SourceRange
-                   | ExprLit Literal
+                   | ExprLit (LiteralT v)
                    | TypeAssertion (ExpressionT v) Type SourceRange
 
-data Literal = ILit Integer SourceRange
-             | FLit Double SourceRange
-             | BLit Bool SourceRange
-             | Null SourceRange
-             | Undef SourceRange
+type Literal = LiteralT String
+data LiteralT v = ILit Integer SourceRange
+                | FLit Double SourceRange
+                | BLit Bool SourceRange
+                | Null SourceRange
+                | Undef SourceRange
+                | StructLit [(String, ExpressionT v)] SourceRange
+                | StructTupleLit [ExpressionT v] SourceRange
 
 instance Source (TypeDefT v) where
   location = typeRange
@@ -142,9 +145,11 @@ instance Source (ExpressionT v) where
   location (FuncCall _ _ r) = r
   location (ExprLit l) = location l
   location (TypeAssertion _ _ r) = r
-instance Source Literal where
+instance Source (LiteralT v) where
   location (ILit _ r) = r
   location (FLit _ r) = r
   location (BLit _ r) = r
   location (Null r) = r
   location (Undef r) = r
+  location (StructTupleLit _ r) = r
+  location (StructLit _ r) = r
