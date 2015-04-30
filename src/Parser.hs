@@ -98,7 +98,7 @@ while :: Parser Statement
 while = withPosition (reserved "while" >> cont >> While <$> expression <* cont <*> scope) <?> "while"
 
 scope :: Parser Statement
-scope = withPosition (Scope <$> braces (many $ statement <* cont)) <?> "scope"
+scope = withPosition (Scope <$> braces (statement `sepEndBy` mustCont)) <?> "scope"
 
 terminator :: Parser Statement
 terminator = withPosition (Terminator <$> keyword) <?> "terminator"
@@ -282,6 +282,9 @@ whiteSpace = T.whiteSpace lexer
 
 cont :: Parser ()
 cont = void . many $ (char '\n' <?> "") >> whiteSpace
+
+mustCont :: Parser ()
+mustCont = (void (symbol "\n" <?> "newline") <|> void (T.semi lexer)) >> cont
 
 parens :: Parser a -> Parser a
 parens p = symbol "(" >> cont >> p <* cont <* symbol ")"
