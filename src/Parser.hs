@@ -159,7 +159,7 @@ subscript :: Parser (Expression -> Expression)
 subscript = postHelp Subscript . brackets . many $ brExpr <|> brOp
   where
     brExpr = Right <$> expression
-    brOp = Left <$> operator
+    brOp = Left <$> ((char '\'' >> many1 letter) <|> operator)
 
 memberAccess :: Parser (Expression -> Expression)
 memberAccess = postHelp MemberAccess $ dot >> identifier
