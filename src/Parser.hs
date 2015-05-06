@@ -190,8 +190,8 @@ numLit = either ILit FLit <$> naturalOrFloat
 structLit :: Parser (SourceRange -> Literal)
 structLit = braces $ try lit <|> tupLit
   where
-    tupLit = StructTupleLit <$> commaSep expression
-    lit = fmap StructLit . commaSep1 $ (,) <$> identifier <* cont <* symbol "=" <*> expression <* cont
+    tupLit = StructTupleLit <$> commaSepEnd expression
+    lit = fmap StructLit . commaSepEnd1 $ (,) <$> identifier <* cont <* symbol "=" <*> expression <* cont
 
 typeDef :: Parser TypeDef
 typeDef = withPosition $ newType <|> alias
@@ -248,7 +248,7 @@ pointerTypeLiteral :: Parser Type
 pointerTypeLiteral = withPosition $ symbol "$" >> PointerT <$> typeLiteral
 
 structTypeLiteral :: Parser Type
-structTypeLiteral = withPosition . braces $ StructT <$> property `sepEndBy` comma
+structTypeLiteral = withPosition . braces $ StructT <$> commaSepEnd property
   where property = (,) <$> identifier <*> (reservedOp ":" >> typeLiteral)
 
 withPosition :: Parser (SourceRange -> a) -> Parser a
@@ -304,13 +304,19 @@ angles :: Parser a -> Parser a
 angles p = symbol "<" >> cont >> p <* cont <* symbol ">"
 
 brackets :: Parser a -> Parser a
-brackets = T.brackets lexer
-
-commaSep :: Parser a -> Parser [a]
-commaSep p = sepBy p $ comma >> cont
+brackets p = symbol "[" >> cont >> p <* cont <* symbol "]"
 
 comma :: Parser ()
 comma = void $ T.comma lexer
+
+commaSepEnd :: Parser a -> Parser [a]
+commaSepEnd p = sepEndBy p $ comma >> cont
+
+commaSepEnd1:: Parser a -> Parser [a]
+commaSepEnd1 p = sepEndBy1 p $ comma >> cont
+
+commaSep :: Parser a -> Parser [a]
+commaSep p = sepBy p $ comma >> cont
 
 commaSep1 :: Parser a -> Parser [a]
 commaSep1 p = sepBy1 p $ comma >> cont
