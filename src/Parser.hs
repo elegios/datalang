@@ -146,7 +146,8 @@ postHelp :: (e -> i -> SourceRange -> e) -> Parser i -> Parser (e -> e)
 postHelp c p = withPosition $ (\i r e -> c e i r) <$> p
 
 newTypeConversion :: Parser (Expression -> Expression)
-newTypeConversion = postHelp NewTypeConversion $ reserved "to" >> newTypeName
+newTypeConversion =
+  postHelp NewTypeConversion $ reserved "to" >> cont >> newTypeName
   where newTypeName = identifier >>= \case
           n@(c:_) | isUpper c -> return n
           n -> unexpected n
