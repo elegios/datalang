@@ -1,0 +1,69 @@
+type Array<i, t> {
+  [i] 0 <= i && i < len
+  -> ptr[i]
+
+  [s::e] 0 <= s && s <= e && e < len
+  -> {ref(ptr[s]), e - s} to Slice
+} { ptr : $t, len : i, cap : i }
+
+type Slice<i, t> {
+  [i] 0 <= i && i < len
+  -> ptr[i]
+
+  [s::e] 0 <= s && s <= e && e < len
+  -> {ref(ptr[s]), e - s} to Slice
+} { ptr : $t, len : i }
+
+type Matrix<t> {
+  rows -> content.len / columns
+
+  [r, c] 0 <= c && 0 <= r && c < columns && r < (content.len / columns)
+  -> content[r * columns + c]
+} {
+  content : Array<U32, t>,
+  columns : U32,
+}
+
+func main
+-> r
+-> r {
+  let a : Matrix<r>
+  let b : Matrix<r>
+  let mut c : Matrix<r>
+  multiply # a, b # c
+}
+
+proc multiply
+Matrix<t>, Matrix<t> -> Matrix<t>
+a, b -> c {
+  let numCells = a.rows * b.columns
+  if c.content.cap <= numCells {
+    realloc # numCells # c.content.ptr
+  }
+  c.content.len = numCells
+  c.columns = b.columns
+
+  let mut col = 0
+  while col < c.columns {
+    defer col = col + 1
+    let mut row = 0
+    while row < c.rows {
+      defer row = row + 1
+
+      let mut s = 0
+      let mut i = 0
+      while i < a.columns {
+      	defer i = i + 1
+        s = s + a[row, i] * b[i, col]
+      }
+
+      c[row, col] = s
+    }
+  }
+}
+
+proc realloc
+i -> $t
+num -> ptr {
+  // TODO: interface with the real realloc
+}

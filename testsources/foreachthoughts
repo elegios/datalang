@@ -1,0 +1,50 @@
+type Array<i, t> {
+  [i] 0 <= i && i < len
+  -> ptr[i]
+
+  [s::e] 0 <= s && s <= e && e < len
+  -> { ref(ptr[s]), e - s } to Slice
+
+  firstIter -> 0
+  ['isIter i] -> 0 <= i && i < len
+  ['next i] -> i + 1
+  ['fromIter i] 0 <= i && i < len
+  -> ptr[i]
+} { ptr : $t, len : i, cap : i }
+
+type Slice<i, t> {
+  [i] 0 <= i && i < len
+  -> ptr[i]
+
+  [s::e] 0 <= s && s <= e && e < len
+  -> { ref(ptr[s]), e - s } to Slice
+
+  firstIter -> 0
+  ['isIter i] -> 0 <= i && i < len
+  ['next i] -> i + 1
+  ['fromIter i] 0 <= i && i < len
+  -> ptr[i]
+} { ptr : $t, len : i }
+
+func main
+-> ret
+-> ret {
+  let mut collection : Array
+  malloc # 42 : I32 # collection
+  let mut it = collection.firstIter
+  while collection['isIter it] {
+    defer it = collection['next it]
+    collection['fromIter it] = true
+  }
+  /* ideally:
+  for it in collection {
+    it = true
+  }
+  */
+}
+
+proc malloc
+n -> Array<n,t>
+n -> ary {
+  // TODO: actual implementation
+}

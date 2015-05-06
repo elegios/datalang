@@ -6,6 +6,7 @@ import Parser.Ast
 import GlobalAst (SourceLoc(..), SourceRange(..), TSize(..), BinOp(..), UnOp(..), TerminatorType(..))
 import Data.Functor ((<$>), (<$))
 import Data.Char (isLower, isUpper)
+import Data.Either (partitionEithers)
 import Control.Applicative ((<*>), (<*))
 import Control.Monad.Identity
 import Text.Parsec hiding (runParser)
@@ -156,10 +157,8 @@ funcCall :: Parser (Expression -> Expression)
 funcCall = postHelp FuncCall . parens $ commaSep expression
 
 subscript :: Parser (Expression -> Expression)
-subscript = postHelp Subscript . brackets . many $ brExpr <|> brOp
-  where
-    brExpr = Right <$> expression
-    brOp = Left <$> ((char '\'' >> many1 letter) <|> operator)
+subscript = postHelp Subscript . brackets . many $
+            (Right <$> expression) <|> (Left <$> brOp)
 
 memberAccess :: Parser (Expression -> Expression)
 memberAccess = postHelp MemberAccess $ dot >> identifier
@@ -198,17 +197,19 @@ typeDef = withPosition $ newType <|> alias
   where
     tParams = option [] . angles $ commaSep1 identifier
     alias = reserved "alias" >> Alias <$> identifier <*> tParams <*> typeLiteral
-    newType = reserved "type" >> NewType <$> identifier <*> tParams
-              <* symbol "{" <* cont
-              <*> option (HideSome []) (reserved "hide" >> cont >> hidePattern <* cont)
-              <*> many ((,) <$> identifier <*> replacement <* cont)
-              <*> many ((,) <$> brPattern <*> replacement <* cont)
-              <* symbol "}"
-              <*> typeLiteral
+    newType = do
+      constr <- reserved "type" >> NewType <$> identifier <*> tParams
+                <* symbol "{" <* cont
+                <*> option (HideSome []) (reserved "hide" >> cont >> hidePattern <* cont)
+      (ids, brs) <- fmap partitionEithers . many $
+                    (Left <$> ((,) <$> identifier <*> replacement <* cont)) <|>
+                    (Right <$> ((,) <$> brPattern <*> replacement <* cont))
+      symbol "}"
+      constr ids brs <$> typeLiteral
     hidePattern = replace symbol "*" HideAll <|> HideSome <$> commaSep1 identifier
     brPattern = brackets . many $
       (BrId <$> identifier <*> optionMaybe (symbol "=" >> expression))
-      <|> (BrOp <$> operator)
+      <|> (BrOp <$> brOp)
     replacement = cont >> (,) <$> optionMaybe (optional (symbol "|" >> cont) >> expression <* cont) <* symbol "->" <* cont <*> expression
 
 typeLiteral :: Parser Type -- TODO: parse func and proc type literals
@@ -250,6 +251,9 @@ pointerTypeLiteral = withPosition $ symbol "$" >> PointerT <$> typeLiteral
 structTypeLiteral :: Parser Type
 structTypeLiteral = withPosition . braces $ StructT <$> commaSepEnd property
   where property = (,) <$> identifier <*> (reservedOp ":" >> typeLiteral)
+
+brOp :: Parser String
+brOp = (char '\'' >> many1 letter <* whiteSpace) <|> operator
 
 withPosition :: Parser (SourceRange -> a) -> Parser a
 withPosition p = do
