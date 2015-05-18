@@ -93,8 +93,8 @@ instance Resolvable StatementT where
   resolve (Terminator t r) = return $ Terminator t r
   resolve (If c ts mes r) =
     If <$> resolve c <*> resolve ts <*> T.mapM resolve mes <*> return r
-  resolve (ProcCall c i o r) =
-    ProcCall <$> resolve c <*> mapM resolve i <*> mapM resolve o <*> return r
+  resolve (ProcCall inl c i o r) =
+    ProcCall inl <$> resolve c <*> mapM resolve i <*> mapM resolve o <*> return r
   resolve (Scope s r) = do
     prevState <- get
     currentDepth += 1
@@ -111,7 +111,8 @@ instance Resolvable StatementT where
 instance Resolvable ExpressionT where
   resolve (Bin o e1 e2 r) = Bin o <$> resolve e1 <*> resolve e2 <*> return r
   resolve (Un o e r) = Un o <$> resolve e <*> return r
-  resolve (FuncCall c i r) = FuncCall <$> resolve c <*> mapM resolve i <*> return r
+  resolve (FuncCall inl c i r) =
+    FuncCall inl <$> resolve c <*> mapM resolve i <*> return r
   resolve (ExprLit l) = ExprLit <$> resolve l
   resolve (TypeAssertion e t r) = TypeAssertion <$> resolve e <*> return t <*> return r
   resolve (MemberAccess e m r) =

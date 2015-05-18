@@ -1,7 +1,7 @@
 module Inference.Ast where
 
 import NameResolution.Ast
-import GlobalAst (SourceRange(..), TSize(..), BinOp(..), UnOp(..), TerminatorType(..), location, Source)
+import GlobalAst (SourceRange(..), TSize(..), BinOp(..), UnOp(..), TerminatorType(..), location, Source, Inline(..))
 import qualified Data.Map as M
 
 type CallableDef = CallableDefT TypeKey CompoundAccess Literal
@@ -25,7 +25,7 @@ data CallableDefT t a l = FuncDef
                         }
 
 type Statement = StatementT TypeKey CompoundAccess Literal
-data StatementT t a l = ProcCall (ExpressionT t a l) [ExpressionT t a l] [ExpressionT t a l] SourceRange
+data StatementT t a l = ProcCall Inline (ExpressionT t a l) [ExpressionT t a l] [ExpressionT t a l] SourceRange
                       | Defer (StatementT t a l) SourceRange
                       | ShallowCopy (ExpressionT t a l) (ExpressionT t a l) SourceRange
                       | If (ExpressionT t a l) (StatementT t a l) (Maybe (StatementT t a l)) SourceRange
@@ -39,7 +39,7 @@ data ExpressionT t a l = Bin BinOp (ExpressionT t a l) (ExpressionT t a l) Sourc
                      | Un UnOp (ExpressionT t a l) SourceRange
                      | CompoundAccess (ExpressionT t a l) a SourceRange
                      | Variable Resolved t SourceRange
-                     | FuncCall (ExpressionT t a l) [ExpressionT t a l] t SourceRange
+                     | FuncCall Inline (ExpressionT t a l) [ExpressionT t a l] t SourceRange
                      | ExprLit l
                      deriving Show
 

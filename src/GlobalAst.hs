@@ -39,6 +39,8 @@ data SourceT t = Source
 -- TODO: Constant support
 -- TODO: Function overloading and selection
 
+data Inline = NeverInline | UnspecifiedInline | AlwaysInline deriving (Show, Ord, Eq)
+
 data TSize = S8 | S16 | S32 | S64 deriving (Show, Ord, Eq)
 data Type = IntT TSize
           | UIntT TSize

@@ -290,12 +290,12 @@ instance Enterable P.Type s (Inferred s) where
   enter (P.UnknownT _) = newUnbound noRestriction
 
 instance Enterable (P.StatementT Resolved) s (IStatement s) where
-  enter (P.ProcCall p is os r) = do
+  enter (P.ProcCall inl p is os r) = do
     (p', t) <- enterT p
     (is', its) <- unzip <$> mapM enterT is
     (os', ots) <- unzip <$> mapM enterT os
     unify errF t $ IProc its ots
-    return $ ProcCall p' is' os' r
+    return $ ProcCall inl p' is' os' r
     where errF m = ErrorString $ show r ++ ": " ++ m
   enter (P.Defer s r) = Defer <$> enter s <*> return r
   enter (P.ShallowCopy var e r) = do
@@ -392,11 +392,11 @@ instance EnterableWithType (P.ExpressionT Resolved) s (IExpression s) where
     where
       locErr m = ErrorString $ "Compiler error: unsupported replacementlocal: " ++ m
       resErr = ErrorString $ "Compiler error: var " ++ show n ++ " at " ++ show r ++ " not found"
-  enterT (P.FuncCall f is r) = do
+  enterT (P.FuncCall inl f is r) = do
     (f', t) <- enterT f
     (is', its) <- unzip <$> mapM enterT is
     ret <- getFuncReturn errF t its
-    return (FuncCall f' is' ret r, ret)
+    return (FuncCall inl f' is' ret r, ret)
     where errF m = ErrorString $ "Expression at " ++ show (location f) ++ " must be a func: " ++ m
   enterT (P.ExprLit l) = (_1 %~ ExprLit) <$> enterT l
   enterT (P.TypeAssertion e t r) = do
@@ -741,8 +741,8 @@ instance Finalizable (ICallableDef s) s CallableDef where
                  <*> return (location d)
 
 instance Finalizable (IStatement s) s Statement where
-  exit (ProcCall p is os r) =
-    ProcCall <$> exit p <*> mapM exit is <*> mapM exit os <*> return r
+  exit (ProcCall inl p is os r) =
+    ProcCall inl <$> exit p <*> mapM exit is <*> mapM exit os <*> return r
   exit (Defer s r) = Defer <$> exit s <*> return r
   exit (ShallowCopy a e r) = ShallowCopy <$> exit a <*> exit e <*> return r
   exit (If c t me r) = If <$> exit c <*> exit t <*> T.mapM exit me <*> return r
@@ -765,8 +765,8 @@ instance Finalizable (IExpression s) s Expression where
         IExpandedMember m -> return $ ExpandedMember m
         IExpandedSubscript index -> ExpandedSubscript <$> exit index
   exit (Variable n t r) = Variable n <$> convertType (exErr r) t <*> return r
-  exit (FuncCall f as ret r) =
-    FuncCall <$> exit f <*> mapM exit as <*> convertType (exErr r) ret <*> return r
+  exit (FuncCall inl f as ret r) =
+    FuncCall inl <$> exit f <*> mapM exit as <*> convertType (exErr r) ret <*> return r
   exit (ExprLit l) = ExprLit <$> exit l
 
 instance Finalizable (ILiteral s) s I.Literal where

@@ -2,7 +2,7 @@
 
 module Parser.Ast where
 
-import GlobalAst (SourceRange(..), TSize(..), BinOp(..), UnOp(..), TerminatorType(..), Source, location)
+import GlobalAst (SourceRange(..), TSize(..), BinOp(..), UnOp(..), TerminatorType(..), Source, location, Inline(..))
 import Data.Generics.Uniplate.Direct
 
 type SourceFile = SourceFileT String
@@ -87,7 +87,7 @@ instance Biplate [Type] Type where
   biplate (t:ts) = plate (:) |* t ||* ts
 
 type Statement = StatementT String
-data StatementT v = ProcCall (ExpressionT v) [ExpressionT v] [ExpressionT v] SourceRange
+data StatementT v = ProcCall Inline (ExpressionT v) [ExpressionT v] [ExpressionT v] SourceRange
                   | Defer (StatementT v) SourceRange
                   | ShallowCopy (ExpressionT v) (ExpressionT v) SourceRange
                   | If (ExpressionT v) (StatementT v) (Maybe (StatementT v)) SourceRange
@@ -102,7 +102,7 @@ data ExpressionT v = Bin BinOp (ExpressionT v) (ExpressionT v) SourceRange
                    | MemberAccess (ExpressionT v) String SourceRange
                    | Subscript (ExpressionT v) [Either String (ExpressionT v)] SourceRange
                    | Variable v SourceRange
-                   | FuncCall (ExpressionT v) [ExpressionT v] SourceRange
+                   | FuncCall Inline (ExpressionT v) [ExpressionT v] SourceRange
                    | ExprLit (LiteralT v)
                    | TypeAssertion (ExpressionT v) Type SourceRange
                    | NewTypeConversion (ExpressionT v) String SourceRange
@@ -129,7 +129,7 @@ instance Source Type where
   location (PointerT _ r) = r
   location (StructT _ r) = r
 instance Source (StatementT v) where
-  location (ProcCall _ _ _ r) = r
+  location (ProcCall _ _ _ _ r) = r
   location (Defer _ r) = r
   location (ShallowCopy _ _ r) = r
   location (If _ _ _ r) = r
@@ -143,7 +143,7 @@ instance Source (ExpressionT v) where
   location (MemberAccess _ _ r) = r
   location (Subscript _ _ r) = r
   location (Variable _ r) = r
-  location (FuncCall _ _ r) = r
+  location (FuncCall _ _ _ r) = r
   location (ExprLit l) = location l
   location (TypeAssertion _ _ r) = r
   location (NewTypeConversion _ _ r) = r

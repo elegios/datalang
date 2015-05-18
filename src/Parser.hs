@@ -3,7 +3,7 @@
 module Parser (parseFile) where
 
 import Parser.Ast
-import GlobalAst (SourceLoc(..), SourceRange(..), TSize(..), BinOp(..), UnOp(..), TerminatorType(..))
+import GlobalAst (SourceLoc(..), SourceRange(..), TSize(..), BinOp(..), UnOp(..), TerminatorType(..), Inline(..), location)
 import Data.Functor ((<$>), (<$))
 import Data.Char (isLower, isUpper)
 import Data.Either (partitionEithers)
@@ -34,7 +34,7 @@ langDef = T.LanguageDef
   , T.identLetter = alphaNum <|> char '_'
   , T.opStart = T.opLetter langDef
   , T.opLetter = oneOf "+-*/%<>=!^&|:,"
-  , T.reservedNames = ["defer", "if", "else", "while", "return", "break", "continue", "null", "let", "mut", "func", "proc", "self", "ref", "to"]
+  , T.reservedNames = ["defer", "if", "else", "while", "return", "break", "continue", "null", "let", "mut", "func", "proc", "self", "ref", "to", "inline", "noinline"]
   , T.reservedOpNames =
     [ "-", "^", "&", "!", "*"
     , "/", "%", "+", "-", "<<"
@@ -77,8 +77,13 @@ statement = procCall
         <|> varInit
 
 procCall :: Parser Statement
-procCall = withPosition (try (ProcCall <$> expression <* cont <* char '#') <*> is <*> os) <?> "proc call"
+procCall = withPosition ((spec <|> unspec) <*> is <*> os) <?> "proc call"
   where
+    spec = ProcCall
+           <$> (replace reserved "inline" AlwaysInline <|>
+                replace reserved "noinline" NeverInline)
+           <*> expression <* cont <* char '#'
+    unspec = try (ProcCall UnspecifiedInline <$> expression <* cont <* char '#')
     is = whiteSpace >> commaSep expression
     os = option [] $ try (cont >> symbol "#") >> commaSep expression
 
@@ -154,7 +159,7 @@ newTypeConversion =
           n -> unexpected n
 
 funcCall :: Parser (Expression -> Expression)
-funcCall = postHelp FuncCall . parens $ commaSep expression
+funcCall = postHelp (FuncCall UnspecifiedInline) . parens $ commaSep expression
 
 subscript :: Parser (Expression -> Expression)
 subscript = postHelp Subscript . brackets . many $
@@ -167,9 +172,20 @@ typeAssertion :: Parser (Expression -> Expression)
 typeAssertion = postHelp TypeAssertion $ reservedOp ":" >> cont >> typeLiteral
 
 simpleExpression :: Parser Expression
-simpleExpression = (ref <|> parens expression <|> exprLit <|> variable) <?> "simple expression"
+simpleExpression = (inlineFuncCall <|> ref <|> parens expression <|> exprLit <|> variable) <?> "simple expression"
   where
     ref = withPosition $ reserved "ref" >> Un AddressOf <$> parens expression
+
+inlineFuncCall :: Parser Expression
+inlineFuncCall = withPosition $ do
+  constr <- FuncCall <$> inl
+  expression >>= \case
+    FuncCall _ f is _ -> return $ constr f is
+    e -> fail $ "Expected functioncall at " ++ show (location e)
+    -- TODO: this fail does not produce a nice error message
+  where
+    inl = replace reserved "inline" AlwaysInline
+      <|> replace reserved "noinline" NeverInline
 
 variable :: Parser Expression
 variable = withPosition $ Variable <$> identifier
