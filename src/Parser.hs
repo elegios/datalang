@@ -2,6 +2,8 @@
 
 module Parser (parseFile) where
 
+-- TODO: make whitespace set a flag when it encounters a newline. Make a 'noNewline' parser that uses this. Also a 'wasNewlineOrSemi' for statement separation
+
 import Parser.Ast
 import GlobalAst (SourceLoc(..), SourceRange(..), TSize(..), BinOp(..), UnOp(..), TerminatorType(..), Inline(..), location)
 import Data.Functor ((<$>), (<$))
@@ -9,16 +11,16 @@ import Data.Char (isLower, isUpper)
 import Data.Either (partitionEithers)
 import Control.Applicative ((<*>), (<*))
 import Control.Monad.Identity
-import Text.Parsec hiding (runParser)
+import Text.Parsec hiding (runParser, newline)
 import Text.Parsec.Expr
 import qualified Data.Text.Lazy as L
 import qualified Data.Text.Lazy.IO as LIO
 import qualified Text.Parsec.Token as T
 
-data Box a = Box { unBox :: a }
+data ParseState = ParseState { endPos :: SourcePos, wasNewline :: Bool }
 
 type StreamType = L.Text
-type StateType = Box SourcePos
+type StateType = ParseState
 type UnderlyingMonad = Identity
 
 type Parser = ParsecT StreamType StateType UnderlyingMonad
@@ -48,22 +50,23 @@ runParser :: Parser a -> StateType -> FilePath -> StreamType -> Either ParseErro
 runParser p st path stream = runIdentity $ runParserT p st path stream
 
 parseFile :: FilePath -> IO (Either ParseError SourceFile)
-parseFile path = runParser sourceParser err path <$> LIO.readFile path
-  where err = Box $ error "Compiler error: haven't parsed anything, thus cannot find the end position of a thing"
+parseFile path = runParser sourceParser initState path <$> LIO.readFile path
+  where
+    initState = ParseState (error "Compiler error: haven't parsed anything, thus cannot find the end position of a thing") True
 
 sourceParser :: Parser SourceFile
-sourceParser = whiteSpace >> SourceFile <$> many (typeDef <* cont) <*> many (callableDef <* cont) <* eof
+sourceParser = whiteSpace >> SourceFile <$> many typeDef <*> many callableDef <* eof
 
 callableDef :: Parser CallableDef
 callableDef = withPosition $
-  (reserved "proc" >> cont >> makedef ProcDef commaSep commaSep) <|>
-  (reserved "func" >> cont >> makedef FuncDef id id)
+  (reserved "proc" >> makedef ProcDef commaSep commaSep) <|>
+  (reserved "func" >> makedef FuncDef id id)
   where
-    makedef c m1 m2 = c <$> identifier <* cont
-                  <*> commaSep typeLiteral <* cont <* symbol "->" <* cont
-                  <*> m1 typeLiteral <* cont
-                  <*> commaSep identifier <* cont <* symbol "->" <* cont
-                  <*> m2 identifier <* cont
+    makedef c m1 m2 = c <$> identifier
+                  <*> commaSep typeLiteral <* symbol "->"
+                  <*> m1 typeLiteral
+                  <*> commaSep identifier <* symbol "->"
+                  <*> m2 identifier
                   <*> scope
 
 statement :: Parser Statement
@@ -82,40 +85,40 @@ procCall = withPosition ((spec <|> unspec) <*> is <*> os) <?> "proc call"
     spec = ProcCall
            <$> (replace reserved "inline" AlwaysInline <|>
                 replace reserved "noinline" NeverInline)
-           <*> expression <* cont <* char '#'
-    unspec = try (ProcCall UnspecifiedInline <$> expression <* cont <* char '#')
+           <*> expression <* char '#'
+    unspec = try (ProcCall UnspecifiedInline <$> expression <* char '#')
     is = whiteSpace >> commaSep expression
-    os = option [] $ try (cont >> symbol "#") >> commaSep expression
+    os = option [] $ symbol "#" >> commaSep expression
 
 defer :: Parser Statement
-defer = withPosition (reserved "defer" >> cont >> (Defer <$> statement)) <?> "defer"
+defer = withPosition (reserved "defer" >> (Defer <$> statement)) <?> "defer"
 
 shallowCopy :: Parser Statement
-shallowCopy = withPosition (ShallowCopy <$> try (expression <* cont <* symbol "=") <* cont <*> expression) <?> "assignment"
+shallowCopy = withPosition (ShallowCopy <$> try (expression <* symbol "=") <*> expression) <?> "assignment"
 
 ifStatement :: Parser Statement
-ifStatement = withPosition (reserved "if" >> cont >> If <$> condition <*> thenBody <*> optionMaybe elseBody) <?> "if"
+ifStatement = withPosition (reserved "if" >> If <$> condition <*> thenBody <*> optionMaybe elseBody) <?> "if"
   where
     condition = expression
-    thenBody = cont >> scope
-    elseBody = try (cont >> reserved "else") >> cont >> (ifStatement <|> scope)
+    thenBody = scope
+    elseBody = reserved "else" >> (ifStatement <|> scope)
 
 while :: Parser Statement
-while = withPosition (reserved "while" >> cont >> While <$> expression <* cont <*> scope) <?> "while"
+while = withPosition (reserved "while" >> While <$> expression <*> scope) <?> "while"
 
 scope :: Parser Statement
-scope = withPosition (Scope <$> braces (statement `sepEndBy` mustCont)) <?> "scope"
+scope = withPosition (Scope <$> braces (statement `sepEndBy` separator)) <?> "scope"
 
 terminator :: Parser Statement
 terminator = withPosition (Terminator <$> keyword) <?> "terminator"
   where keyword = replace reserved "return" Return <|> replace reserved "break" Break <|> replace reserved "continue" Continue
 
 varInit :: Parser Statement
-varInit = withPosition (VarInit <$> (reserved "let" >> cont >> mutable) <* cont <*> identifier <*> typeAnno <*> value) <?> "var init"
+varInit = withPosition (VarInit <$> (reserved "let" >> mutable) <*> identifier <*> typeAnno <*> value) <?> "var init"
   where
     mutable = option False $ replace reserved "mut" True
-    typeAnno = optionMaybe $ reservedOp ":" >> cont >> typeLiteral
-    value = optionMaybe $ symbol "=" >> cont >> expression
+    typeAnno = optionMaybe $ reservedOp ":" >> typeLiteral
+    value = optionMaybe $ symbol "=" >> expression
 
 expression :: Parser Expression
 expression = buildExpressionParser expressionTable simpleExpression <?> "expression"
@@ -140,10 +143,10 @@ expressionTable =
 
 -- TODO: pretty ugly range here, it only covers the operator, not both expressions and the operator
 bin :: String -> BinOp -> ExpOp
-bin name op = Infix (withPosition $ (\s e1 e2 -> Bin op e1 e2 s) <$ reservedOp name <* cont) AssocLeft
+bin name op = Infix (withPosition $ (\s e1 e2 -> Bin op e1 e2 s) <$ reservedOp name) AssocLeft
 
 pre :: String -> UnOp -> ExpOp
-pre name op = Prefix (withPosition $ flip (Un op) <$ reservedOp name <* cont)
+pre name op = Prefix (withPosition $ flip (Un op) <$ reservedOp name)
 
 post :: Parser (Expression -> Expression) -> ExpOp
 post p = Postfix . chainl1 p . return $ flip (.)
@@ -153,23 +156,24 @@ postHelp c p = withPosition $ (\i r e -> c e i r) <$> p
 
 newTypeConversion :: Parser (Expression -> Expression)
 newTypeConversion =
-  postHelp NewTypeConversion $ reserved "to" >> cont >> newTypeName
+  postHelp NewTypeConversion $ reserved "to" >> newTypeName
   where newTypeName = identifier >>= \case
           n@(c:_) | isUpper c -> return n
           n -> unexpected n
 
 funcCall :: Parser (Expression -> Expression)
-funcCall = postHelp (FuncCall UnspecifiedInline) . parens $ commaSep expression
+funcCall = postHelp (FuncCall UnspecifiedInline) $
+           noNewline >> parens (commaSep expression)
 
 subscript :: Parser (Expression -> Expression)
-subscript = postHelp Subscript . brackets . many $
-            (Right <$> expression) <|> (Left <$> brOp)
+subscript = postHelp Subscript $ noNewline >> (brackets . many $
+            (Right <$> expression) <|> (Left <$> brOp))
 
 memberAccess :: Parser (Expression -> Expression)
 memberAccess = postHelp MemberAccess $ dot >> identifier
 
 typeAssertion :: Parser (Expression -> Expression)
-typeAssertion = postHelp TypeAssertion $ reservedOp ":" >> cont >> typeLiteral
+typeAssertion = postHelp TypeAssertion $ reservedOp ":" >> typeLiteral
 
 simpleExpression :: Parser Expression
 simpleExpression = (inlineFuncCall <|> ref <|> parens expression <|> exprLit <|> variable) <?> "simple expression"
@@ -206,7 +210,7 @@ structLit :: Parser (SourceRange -> Literal)
 structLit = braces $ try lit <|> tupLit
   where
     tupLit = StructTupleLit <$> commaSepEnd expression
-    lit = fmap StructLit . commaSepEnd1 $ (,) <$> identifier <* cont <* symbol "=" <*> expression <* cont
+    lit = fmap StructLit . commaSepEnd1 $ (,) <$> identifier <* symbol "=" <*> expression
 
 typeDef :: Parser TypeDef
 typeDef = withPosition $ newType <|> alias
@@ -215,18 +219,18 @@ typeDef = withPosition $ newType <|> alias
     alias = reserved "alias" >> Alias <$> identifier <*> tParams <*> typeLiteral
     newType = do
       constr <- reserved "type" >> NewType <$> identifier <*> tParams
-                <* symbol "{" <* cont
-                <*> option (HideSome []) (reserved "hide" >> cont >> hidePattern <* cont)
-      (ids, brs) <- fmap partitionEithers . many $
-                    (Left <$> ((,) <$> identifier <*> replacement <* cont)) <|>
-                    (Right <$> ((,) <$> brPattern <*> replacement <* cont))
+                <* symbol "{"
+                <*> option (HideSome []) (reserved "hide" >> hidePattern)
+      (ids, brs) <- fmap partitionEithers . (`sepEndBy` separator) $
+                    (Left <$> ((,) <$> identifier <*> replacement)) <|>
+                    (Right <$> ((,) <$> brPattern <*> replacement))
       symbol "}"
       constr ids brs <$> typeLiteral
     hidePattern = replace symbol "*" HideAll <|> HideSome <$> commaSep1 identifier
     brPattern = brackets . many $
       (BrId <$> identifier <*> optionMaybe (symbol "=" >> expression))
       <|> (BrOp <$> brOp)
-    replacement = cont >> (,) <$> optionMaybe (optional (symbol "|" >> cont) >> expression <* cont) <* symbol "->" <* cont <*> expression
+    replacement = (,) <$> optionMaybe (optional (symbol "|") >> expression) <* symbol "->" <*> expression
 
 typeLiteral :: Parser Type -- TODO: parse func and proc type literals
 typeLiteral = simpleTypeLiteral
@@ -275,17 +279,20 @@ withPosition :: Parser (SourceRange -> a) -> Parser a
 withPosition p = do
   start <- getPosition
   ret <- p
-  ret <$> toSourceRange start . unBox <$> getState
+  ret <$> toSourceRange start . endPos <$> getState
 
 toSourceRange :: SourcePos -> SourcePos -> SourceRange
 toSourceRange from to = SourceRange (toLoc from) (toLoc to)
   where toLoc pos = SourceLoc (sourceName pos) (sourceLine pos) (sourceColumn pos)
 
 lexer :: Stream StreamType UnderlyingMonad Char => T.GenTokenParser StreamType StateType UnderlyingMonad
-lexer = T.makeTokenParser langDef setEndPos
+lexer = T.makeTokenParser langDef setEndPos setWasNewline
 
 setEndPos :: Parser ()
-setEndPos = getPosition >>= putState . Box
+setEndPos = getPosition >>= \p -> modifyState (\s -> s { endPos = p})
+
+setWasNewline :: Bool -> Parser ()
+setWasNewline n = modifyState $ \s -> s { wasNewline = n }
 
 symbol :: String -> Parser ()
 symbol = void . T.symbol lexer
@@ -308,41 +315,47 @@ naturalOrFloat = T.naturalOrFloat lexer
 whiteSpace :: Parser ()
 whiteSpace = T.whiteSpace lexer
 
-cont :: Parser ()
-cont = void . many $ (char '\n' <?> "") >> whiteSpace
-
-mustCont :: Parser ()
-mustCont = (void (symbol "\n" <?> "newline") <|> void (T.semi lexer)) >> cont
-
 parens :: Parser a -> Parser a
-parens p = symbol "(" >> cont >> p <* cont <* symbol ")"
+parens = T.parens lexer
 
 braces :: Parser a -> Parser a
-braces p = symbol "{" >> cont >> p <* cont <* symbol "}"
+braces = T.braces lexer
 
 angles :: Parser a -> Parser a
-angles p = symbol "<" >> cont >> p <* cont <* symbol ">"
+angles = T.angles lexer
 
 brackets :: Parser a -> Parser a
-brackets p = symbol "[" >> cont >> p <* cont <* symbol "]"
+brackets = T.brackets lexer
 
 comma :: Parser ()
 comma = void $ T.comma lexer
 
 commaSepEnd :: Parser a -> Parser [a]
-commaSepEnd p = sepEndBy p $ comma >> cont
+commaSepEnd p = sepEndBy p comma
 
 commaSepEnd1:: Parser a -> Parser [a]
-commaSepEnd1 p = sepEndBy1 p $ comma >> cont
+commaSepEnd1 p = sepEndBy1 p comma
 
 commaSep :: Parser a -> Parser [a]
-commaSep p = sepBy p $ comma >> cont
+commaSep p = sepBy p comma
 
 commaSep1 :: Parser a -> Parser [a]
-commaSep1 p = sepBy1 p $ comma >> cont
+commaSep1 p = sepBy1 p comma
 
 dot :: Parser ()
 dot = void $ char '.'
 
 replace :: Functor f => (a -> f c) -> a -> b -> f b
 replace f a b = b <$ f a
+
+separator :: Parser ()
+separator = newline <|> (void . many1 . T.semi) lexer
+
+newline :: Parser ()
+newline = getState >>= boolean (return ()) (fail "") . wasNewline <?> "newline"
+
+noNewline :: Parser ()
+noNewline = getState >>= boolean (fail "") (return ()) . wasNewline
+
+boolean :: a -> a -> Bool -> a
+boolean a b cond = if cond then a else b

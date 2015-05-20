@@ -212,6 +212,8 @@ data GenTokenParser s u m
         -- | Lexeme parser @symbol s@ parses 'string' @s@ and skips
         -- trailing white space.
 
+        binary           :: ParsecT s u m Integer,
+
         symbol           :: String -> ParsecT s u m String,
 
         -- | @lexeme p@ first applies parser @p@ and than the 'whiteSpace'
@@ -344,8 +346,8 @@ data GenTokenParser s u m
 -- >  ...
 
 makeTokenParser :: (Stream s m Char)
-                => GenLanguageDef s u m -> ParsecT s u m () -> GenTokenParser s u m
-makeTokenParser languageDef setEndPos
+                => GenLanguageDef s u m -> ParsecT s u m () -> (Bool -> ParsecT s u m ()) -> GenTokenParser s u m
+makeTokenParser languageDef setEndPos setFoundNewline
     = TokenParser{ identifier = identifier
                  , reserved = reserved
                  , operator = operator
@@ -360,10 +362,11 @@ makeTokenParser languageDef setEndPos
                  , decimal = decimal
                  , hexadecimal = hexadecimal
                  , octal = octal
+                 , binary = binary
 
                  , symbol = symbol
-                 , lexeme = lex setEndPos
-                 , whiteSpace = whiteSpace
+                 , lexeme = lexeme
+                 , whiteSpace = white setEndPos setFoundNewline
 
                  , parens = parens
                  , braces = braces
@@ -469,7 +472,7 @@ makeTokenParser languageDef setEndPos
 
 
     -- escape code tables
-    escMap          = zip ("abfnrtv\\\"\'") ("\a\b\f\n\r\t\v\\\"\'")
+    escMap          = zip ("abfnrtv\\\"\'") ("\a\b\f\n\r\t\v\\\"\'") --"
     asciiMap        = zip (ascii3codes ++ ascii2codes) (ascii3 ++ ascii2)
 
     ascii2codes     = ["BS","HT","LF","VT","FF","CR","SO","SI","EM",
@@ -568,8 +571,9 @@ makeTokenParser languageDef setEndPos
                       <?> ""
 
     decimal         = number 10 digit
-    hexadecimal     = do{ oneOf "xX"; number 16 hexDigit }
-    octal           = do{ oneOf "oO"; number 8 octDigit  }
+    hexadecimal     = do{ oneOf "xX"; number 16 hexDigit    }
+    octal           = do{ oneOf "oO"; number 8 octDigit     }
+    binary          = do{ oneOf "bB"; number 2 (oneOf "01") }
 
     number base baseDigit
         = do{ digits <- many1 baseDigit
@@ -673,18 +677,19 @@ makeTokenParser languageDef setEndPos
     symbol name
         = lexeme (string name)
 
-    lexeme p = lex setEndPos p
+    lexeme p = do{ x <- p; whiteSpace; return x  }
 
-    lex setEndPos p
-        = do{ x <- p; setEndPos; whiteSpace; return x  }
+    newlines setFoundNewline = (whiteSpaceInner skipMany1 (skipMany1 (satisfy isSpace)) >> setFoundNewline True) <|> setFoundNewline False
+    white setEndPos setFoundNewline = do {setEndPos; whiteSpaceInner skipMany simpleSpace; newlines setFoundNewline}
 
 
-    --whiteSpace
-    whiteSpace
-        | noLine && noMulti  = skipMany (simpleSpace <?> "")
-        | noLine             = skipMany (simpleSpace <|> multiLineComment <?> "")
-        | noMulti            = skipMany (simpleSpace <|> oneLineComment <?> "")
-        | otherwise          = skipMany (simpleSpace <|> oneLineComment <|> multiLineComment <?> "")
+    whiteSpace = white setEndPos setFoundNewline
+
+    whiteSpaceInner sk s
+        | noLine && noMulti  = sk (s <?> "")
+        | noLine             = sk (s <|> multiLineComment <?> "")
+        | noMulti            = sk (s <|> oneLineComment <?> "")
+        | otherwise          = sk (s <|> oneLineComment <|> multiLineComment <?> "")
         where
           noLine  = null (commentLine languageDef)
           noMulti = null (commentStart languageDef)
