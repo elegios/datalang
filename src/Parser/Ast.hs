@@ -95,6 +95,7 @@ data StatementT v = ProcCall Inline (ExpressionT v) [ExpressionT v] [ExpressionT
                   | Scope [StatementT v] SourceRange
                   | Terminator TerminatorType SourceRange
                   | VarInit Bool v (Maybe Type) (Maybe (ExpressionT v)) SourceRange
+                  deriving Show
 
 type Expression = ExpressionT String
 data ExpressionT v = Bin BinOp (ExpressionT v) (ExpressionT v) SourceRange
@@ -106,6 +107,7 @@ data ExpressionT v = Bin BinOp (ExpressionT v) (ExpressionT v) SourceRange
                    | ExprLit (LiteralT v)
                    | TypeAssertion (ExpressionT v) Type SourceRange
                    | NewTypeConversion (ExpressionT v) String SourceRange
+                   deriving Show
 
 type Literal = LiteralT String
 data LiteralT v = ILit Integer SourceRange
@@ -115,6 +117,7 @@ data LiteralT v = ILit Integer SourceRange
                 | Undef SourceRange
                 | StructLit [(String, ExpressionT v)] SourceRange
                 | StructTupleLit [ExpressionT v] SourceRange
+                deriving Show
 
 instance Source (TypeDefT v) where
   location = typeRange
