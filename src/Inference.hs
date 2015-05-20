@@ -576,7 +576,7 @@ applyRestriction errF (IRef r) restr@(IRestriction nt' as' k') = readRef r >>= \
     writeRef r . Unbound $ IRestriction newNt newAs newK
   where mayNTOr MayNew MayNew = MayNew
         mayNTOr _ _ = NoNew
-        numSpecOr spec spec'
+        numSpecOr spec spec' -- NOTE: uses the ordering of data type (ie Ord instance)
           | s == [SignSpec, IntSpec] = return IntSignSpec
           | s1 == FloatSpec && s2 > FloatSpec = err
           | s == [IntSignSpec, UIntSpec] = err
