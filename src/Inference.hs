@@ -230,7 +230,7 @@ enterDef d@P.FuncDef{} t = withCallableType d $ do
   defineTypeVars .= False
   unify errF t $ IFunc is o
   locals .= M.fromList (zip (P.outarg d : P.inargs d) (o : is))
-  FuncDef (P.callableName d) is o
+  FuncDef (P.callableName d) t is o
     <$> return (P.inargs d)
     <*> return (P.outarg d)
     <*> enter (P.callableBody d)
@@ -243,7 +243,7 @@ enterDef d@P.ProcDef{} t = withCallableType d $ do
   defineTypeVars .= False
   unify errF t $ IProc is os
   locals .= M.fromList (zip (P.inargs d ++ P.outargs d) (is ++ os))
-  ProcDef (P.callableName d) is os
+  ProcDef (P.callableName d) t is os
     <$> return (P.inargs d)
     <*> return (P.outargs d)
     <*> enter (P.callableBody d)
@@ -726,14 +726,16 @@ newTypeKey = nextTypeKey <<%= TypeKey . (+1) . representation
 
 instance Finalizable (ICallableDef s) s CallableDef where
   exit d@FuncDef{} = FuncDef (callableName d)
-                 <$> mapM (convertType . exErr $ location d) (intypes d)
+                 <$> convertType (exErr $ location d) (finalType d)
+                 <*> mapM (convertType . exErr $ location d) (intypes d)
                  <*> convertType (exErr $ location d) (outtype d)
                  <*> return (inargs d)
                  <*> return (outarg d)
                  <*> exit (callableBody d)
                  <*> return (location d)
   exit d@ProcDef{} = ProcDef (callableName d)
-                 <$> mapM (convertType . exErr $ location d) (intypes d)
+                 <$> convertType (exErr $ location d) (finalType d)
+                 <*> mapM (convertType . exErr $ location d) (intypes d)
                  <*> mapM (convertType . exErr $ location d) (outtypes d)
                  <*> return (inargs d)
                  <*> return (outargs d)

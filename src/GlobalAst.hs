@@ -53,6 +53,12 @@ data Type = IntT TSize
           | UnknownT
           deriving (Show, Ord, Eq)
 
+getSizeFromTSize :: Integral a => TSize -> a
+getSizeFromTSize S8 = 8
+getSizeFromTSize S16 = 16
+getSizeFromTSize S32 = 32
+getSizeFromTSize S64 = 64
+
 data Replacements = Replacements
   { identifiers :: M.Map String (Maybe Expression, Expression)
   , patterns :: [([BracketToken], (Maybe Expression, Expression))]

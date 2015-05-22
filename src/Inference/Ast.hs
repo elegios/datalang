@@ -7,6 +7,7 @@ import qualified Data.Map as M
 type CallableDef = CallableDefT TypeKey CompoundAccess Literal
 data CallableDefT t a l = FuncDef
                         { callableName :: String
+                        , finalType :: t
                         , intypes :: [t]
                         , outtype :: t
                         , inargs :: [Resolved]
@@ -16,6 +17,7 @@ data CallableDefT t a l = FuncDef
                         }
                       | ProcDef
                         { callableName :: String
+                        , finalType :: t
                         , intypes :: [t]
                         , outtypes :: [t]
                         , inargs :: [Resolved]
@@ -62,8 +64,6 @@ data FlatType = IntT TSize
               | UIntT TSize
               | FloatT TSize
               | BoolT
-              | NamedT String [TypeKey]
-              | TypeVar String
               | PointerT TypeKey
               | StructT [(String, TypeKey)]
               | FuncT [TypeKey] TypeKey
