@@ -34,7 +34,7 @@ data StatementT t a l = ProcCall Inline (ExpressionT t a l) [ExpressionT t a l] 
                       | While (ExpressionT t a l) (StatementT t a l) SourceRange
                       | Scope [StatementT t a l] SourceRange
                       | Terminator TerminatorType SourceRange
-                      | VarInit Bool Resolved t (ExpressionT t a l) SourceRange
+                      | VarInit Bool Resolved (ExpressionT t a l) SourceRange
 
 type Expression = ExpressionT TypeKey CompoundAccess Literal
 data ExpressionT t a l = Bin BinOp (ExpressionT t a l) (ExpressionT t a l) SourceRange

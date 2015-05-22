@@ -327,7 +327,7 @@ instance Enterable (P.StatementT Resolved) s (IStatement s) where
         unify errF u t'
         return (ExprLit $ Zero u r, t')
     locals . at n ?= t'
-    return $ VarInit mut n t' e' r
+    return $ VarInit mut n e' r
     where
       errF m = ErrorString $ "Type mismatch in let at " ++ show r ++ ": " ++ m
       internal = ErrorString $ "Compiler error: neither type nor expr at " ++ show r
@@ -751,8 +751,8 @@ instance Finalizable (IStatement s) s Statement where
   exit (While c s r) = While <$> exit c <*> exit s <*> return r
   exit (Scope stmnts r) = Scope <$> mapM exit stmnts <*> return r
   exit (Terminator t r) = return $ Terminator t r
-  exit (VarInit mut n t e r) =
-    VarInit mut n <$> convertType (exErr r) t <*> exit e <*> return r
+  exit (VarInit mut n e r) =
+    VarInit mut n <$> exit e <*> return r
 
 instance Finalizable (IExpression s) s Expression where
   exit (Bin o e1 e2 r) = Bin o <$> exit e1 <*> exit e2 <*> return r
@@ -816,16 +816,11 @@ instance Ref STRef where
   readRef = lift . lift . readSTRef
   writeRef r = lift . lift . writeSTRef r
 
---- NOTE: stolen from hydrogen package source (with minor change)
+--- NOTE: stolen from hydrogen package source (with major changes)
 unionWithM :: (Ord k, Monad m) => (a -> a -> m a) -> M.Map k a -> M.Map k a -> m (M.Map k a)
-unionWithM f a b =
-  liftM M.fromAscList
-    . sequence
-    . fmap (\(k, v) -> liftM (k,) v)
-    . M.toAscList
-    $ M.unionWith f' (M.map return a) (M.map return b)
+unionWithM f a b = T.mapM id $ M.unionWith f' (return <$> a) (return <$> b)
   where
-    f' mx my = mx >>= \x -> my >>= \y -> f x y
+    f' mx my = mx >>= \x -> my >>= f x
 
 {-
 Two stage inference:

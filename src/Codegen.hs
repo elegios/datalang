@@ -2,13 +2,13 @@
 
 module CodeGen (generate) where
 
-import GlobalAst (Inline(..), getSizeFromTSize)
+import GlobalAst (Inline(..), getSizeFromTSize, nowhere, TerminatorType(..))
 import NameResolution.Ast (Resolved(..))
-import Inference.Ast (TypeKey, FlatType(..), CallableDef, CallableDefT(..), Statement, StatementT(..), Expression, ExpressionT(..))
+import Inference.Ast (TypeKey, FlatType(..), CallableDef, CallableDefT(..), Statement, StatementT(..), Expression, ExpressionT(..), Literal(..))
 import Control.Applicative ((<*>), Applicative)
-import Control.Lens
+import Control.Lens hiding (op)
 import Control.Monad.State
-import Control.Monad.Except (ExceptT, runExceptT)
+import Control.Monad.Except (ExceptT, runExceptT, MonadError, throwError)
 import Data.Either (partitionEithers)
 import Data.Functor ((<$>))
 import Data.Word (Word32, Word)
@@ -37,7 +37,16 @@ data CodeGenState = CodeGenState
                     , _entryBlock :: BasicBlock
                     , _currentBlock :: BasicBlock
                     , _finalizedBlocks :: [BasicBlock]
+                    , _retInstr :: Named I.Terminator
+                    , _defers :: Defers
+                    , _breakTarget :: Maybe Name
+                    , _continueTarget :: Maybe Name
                     }
+data Defers = Defers
+              { _defersAll :: [Statement]
+              , _defersLoop :: [Statement]
+              , _defersScope :: [Statement]
+              }
 
 data SuperState = SuperState
                   { _callableNames :: M.Map (Resolved, TypeKey, Inline) Name
@@ -56,6 +65,7 @@ class GenerateableWithOperand a where
 
 makeLenses ''CodeGenState
 makeLenses ''SuperState
+makeLenses ''Defers
 
 generate :: [(CallableDef, M.Map TypeKey FlatType)] -> Either [ErrorMessage] AST.Module
 generate inferred = runSuper $ do
@@ -116,27 +126,65 @@ genCallable (d, ts) = do
               , _currentBlock = BasicBlock "first" [] (Do $ I.Ret Nothing [])
               , _finalizedBlocks = []
               , _locals = M.empty
+              , _retInstr = Do $ I.Ret Nothing []
+              , _defers = Defers [] [] []
+              , _breakTarget = Nothing
+              , _continueTarget = Nothing
               }
 
 codegenCallable :: CallableDef -> CodeGen AST.Global
-codegenCallable FuncDef{} = undefined -- TODO
+codegenCallable d@FuncDef{} = do
+  (ins, inps) <- fmap unzip . mapM (makeParamOp False) $ intypes d
+  (out, _) <- makeParamOp True $ outtype d
+  locals .= M.fromList (zip (outarg d : inargs d) (out : ins))
+
+  retInstr .= (Do $ I.Br "return" [])
+  currentBlock . blockTerminator .= (Do $ I.Br "return" [])
+  gen initRet
+
+  firstBlock <- currentBlock <<.= BasicBlock "return" [] undefined
+  Operand _ _ op <- genO readRet >>= unPoint
+  currentBlock . blockTerminator .= (Do $ I.Ret (Just op) [])
+  finalizeAndReplaceWith firstBlock
+
+  blocks <- codegenBody d
+  retty <- toLLVMType False $ outtype d
+  return $ defaultFunction
+    { G.basicBlocks = blocks
+    , G.parameters = (inps, False)
+    , G.returnType = retty
+    }
+  where
+    initRet :: Statement
+    initRet = VarInit True (outarg d) (ExprLit (Zero (outtype d) nowhere)) nowhere
+    readRet :: Expression
+    readRet = Variable (outarg d) (outtype d) nowhere
+
 codegenCallable d@ProcDef{} = do
-  (ins, inps) <- fmap unzip . mapM (makeOp False) $ intypes d
-  (outs, outps) <- fmap unzip . mapM (makeOp True) $ outtypes d
+  (ins, inps) <- fmap unzip . mapM (makeParamOp False) $ intypes d
+  (outs, outps) <- fmap unzip . mapM (makeParamOp True) $ outtypes d
   locals .= M.fromList (zip (inargs d ++ outargs d) (ins ++ outs))
-  gen $ callableBody d
-  use entryBlock >>= finalizeBlock
-  blocks <- use finalizedBlocks
+
+  blocks <- codegenBody d
   return $ defaultFunction
     { G.basicBlocks = blocks
     , G.parameters = (inps ++ outps, False)
     }
-  where
-    makeOp pointable t = do
-      n <- newName
-      llvmt <- toLLVMType pointable t
-      return ( Operand t pointable $ AST.LocalReference llvmt n
-             , AST.Parameter llvmt n [])
+
+makeParamOp :: Bool -> TypeKey -> CodeGen (Operand, AST.Parameter)
+makeParamOp pointable t = do
+  n <- newName
+  llvmt <- toLLVMType pointable t
+  return ( Operand t pointable $ AST.LocalReference llvmt n
+         , AST.Parameter llvmt n [])
+
+codegenBody :: CallableDef -> CodeGen [BasicBlock]
+codegenBody d = do
+  gen $ callableBody d
+  use currentBlock >>= finalizeBlock
+  use entryBlock >>= finalizeBlock
+  use finalizedBlocks
+
 -- ###Regular code generation
 
 instance Generateable Statement where
@@ -145,6 +193,72 @@ instance Generateable Statement where
     iOps <- mapM (genO >=> unPoint) is
     oOps <- mapM genO os
     uinstr $ I.Call False CC.Fast [] pop ((,[]) . getOp <$> (iOps ++ oOps)) [] []
+  gen (Defer stmnt _) = do
+    defers . defersAll %= (stmnt :)
+    defers . defersLoop %= (stmnt :)
+    defers . defersScope %= (stmnt :)
+  gen (ShallowCopy a e _) = do
+    Operand _ True aOp <- genO a -- TODO: throw error before codegen if fail
+    Operand _ False eOp <- genO e >>= unPoint
+    uinstr $ I.Store False aOp eOp Nothing 0 []
+  gen (If cond stmnt mElseStmnt _) = do
+    Operand _ _ condOp <- genO cond >>= unPoint
+    (thenName, elseName, nextName) <- (,,) <$> newName <*> newName <*> newName
+    prevTerminator <- currentBlock . blockTerminator <<.=
+                      (Do $ I.CondBr condOp thenName elseName [])
+
+    finalizeAndReplaceWith $ BasicBlock thenName [] (Do $ I.Br nextName [])
+    gen stmnt
+
+    finalizeAndReplaceWith $ BasicBlock elseName [] (Do $ I.Br nextName [])
+    maybe (return ()) gen mElseStmnt
+
+    finalizeAndReplaceWith $ BasicBlock nextName [] prevTerminator
+  gen (While cond stmnt _) = do
+    (condName, bodyName, nextName) <- (,,) <$> newName <*> newName <*> newName
+    prevTerminator <- currentBlock . blockTerminator <<.= (Do $ I.Br condName [])
+
+    finalizeAndReplaceWith $ BasicBlock condName [] undefined
+    Operand _ False condOp <- genO cond >>= unPoint
+    currentBlock . blockTerminator .= (Do $ I.CondBr condOp bodyName nextName [])
+
+    finalizeAndReplaceWith $ BasicBlock bodyName [] (Do $ I.Br condName [])
+    prevBreak <- breakTarget <<.= Just nextName
+    prevContinue <- continueTarget <<.= Just condName
+    gen stmnt
+    breakTarget .= prevBreak
+    continueTarget .= prevContinue
+
+    finalizeAndReplaceWith $ BasicBlock nextName [] prevTerminator
+  gen (Scope stmnts _) = do
+    prevLocals <- use locals
+    prevDefers <- use defers
+    defers . defersScope .= []
+
+    mapM_ gen stmnts
+
+    use (defers . defersScope) >>= mapM_ gen
+    defers .= prevDefers
+    locals .= prevLocals
+  gen (Terminator tt r) = do
+    (term, deferred) <- case tt of
+      Return -> (,) <$> use retInstr <*> use (defers . defersAll)
+      _ -> do
+        target <- use (boolean breakTarget continueTarget $ tt == Break) >>=
+          justErr (ErrorString $ "Cannot break or continue at " ++ show r ++ ", no loop.")
+        (Do $ I.Br target [], ) <$> use (defers . defersLoop)
+    mapM_ gen deferred
+    currentBlock . blockTerminator .= term
+  gen (VarInit False n e _) = genO e >>= unPoint >>= (locals . at n ?=)
+  gen (VarInit True n e _) = do
+    Operand t False eOp <- genO e >>= unPoint
+    allocaName <- newName
+    allocaType <- toLLVMType False t
+    let varOp = AST.LocalReference (T.ptr allocaType) allocaName
+        alloca = I.Alloca allocaType Nothing 0 []
+    entryBlock . blockInstrs %= (allocaName := alloca :)
+    locals . at n ?= Operand t True varOp
+    uinstr $ I.Store False varOp eOp Nothing 0 []
 
 instance GenerateableWithOperand Expression where
   genO = undefined -- TODO
@@ -249,6 +363,13 @@ getSize (UIntT s) = getSizeFromTSize s
 getSize (FloatT s) = getSizeFromTSize s
 
 -- ###Helpers:
+
+boolean :: a -> a -> Bool -> a
+boolean a b c = if c then a else b
+
+justErr :: MonadError e m => e -> Maybe a -> m a
+justErr _ (Just a) = return a
+justErr err Nothing = throwError err
 
 mapWith :: Ord k => (a -> k) -> [a] -> M.Map k a
 mapWith f as = M.fromList $ zip (f <$> as) as
