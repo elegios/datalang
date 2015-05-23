@@ -180,11 +180,11 @@ infer (ResolvedSource tDefs cDefs) requests = runST $ flip evalStateT initSuperS
       { _done = S.empty
       }
     initFinalizerState = FinalizerState
-      { _flatTypes = M.empty
-      , _typeKeys = M.empty
+      { _flatTypes = M.singleton bool BoolT
+      , _typeKeys = M.singleton BoolT bool
       , _newTypes = M.empty
-      , _nextTypeKey = TypeKey 0
-      , _toInferred = M.empty
+      , _nextTypeKey = TypeKey 1
+      , _toInferred = M.singleton bool IBool
       }
     basicInferrerState = InferrerState
       { _typeDefs = tDefs
@@ -784,11 +784,11 @@ instance Finalizable (ILiteral s) s I.Literal where
     ps' <- forM ps $ \(p, pt) -> case M.lookup p ms of
       Just me -> exit me
       Nothing -> return . ExprLit $ I.Zero pt r
-    return $ I.StructLit (zip (fst <$> ps) ps') t' r
+    return $ I.StructLit ps' t' r
   exit (StructTupleLit ps t r) = do
     t' <- convertType (exErr r) t
-    StructT ps' <- fmap fromJust . use $ flatTypes . at t'
-    I.StructLit <$> (zip (fst <$> ps') <$> mapM exit ps) <*> return t' <*> return r
+    StructT _ <- fmap fromJust . use $ flatTypes . at t'
+    I.StructLit <$> mapM exit ps <*> return t' <*> return r
 
 exErr :: SourceRange -> ErrF
 exErr r m = ErrorString $ "Error at " ++ show r ++ ": " ++ m

@@ -38,12 +38,12 @@ data StatementT t a l = ProcCall Inline (ExpressionT t a l) [ExpressionT t a l] 
 
 type Expression = ExpressionT TypeKey CompoundAccess Literal
 data ExpressionT t a l = Bin BinOp (ExpressionT t a l) (ExpressionT t a l) SourceRange
-                     | Un UnOp (ExpressionT t a l) SourceRange
-                     | CompoundAccess (ExpressionT t a l) a SourceRange
-                     | Variable Resolved t SourceRange
-                     | FuncCall Inline (ExpressionT t a l) [ExpressionT t a l] t SourceRange
-                     | ExprLit l
-                     deriving Show
+                       | Un UnOp (ExpressionT t a l) SourceRange
+                       | CompoundAccess (ExpressionT t a l) a SourceRange
+                       | Variable Resolved t SourceRange
+                       | FuncCall Inline (ExpressionT t a l) [ExpressionT t a l] t SourceRange
+                       | ExprLit l
+                       deriving Show
 
 type RepMap = M.Map Resolved Expression
 data CompoundAccess = Expanded RepMap (Maybe Expression) Expression
@@ -56,8 +56,10 @@ data Literal = ILit Integer TypeKey SourceRange
              | Null TypeKey SourceRange
              | Undef TypeKey SourceRange
              | Zero TypeKey SourceRange
-             | StructLit [(String, Expression)] TypeKey SourceRange
+             | StructLit [Expression] TypeKey SourceRange
 
+bool :: TypeKey
+bool = TypeKey 0
 newtype TypeKey = TypeKey { representation :: Int } deriving (Eq, Ord, Show)
 
 data FlatType = IntT TSize
