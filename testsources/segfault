@@ -1,7 +1,7 @@
 func main
 -> ret
 -> ret {
-  let p : $I32
+  let mut p : $I32
   p = null
   $p = 7 : I32
   ret = $p
