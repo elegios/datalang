@@ -549,3 +549,34 @@ structliteral -> not numerical, not newtype
 any kind of literal -> not newtype
 
 eventually these may need to express "can cast/convert from/to", unless a better mechanism is implmented for that
+
+-------------------------
+
+usability:
+- nicer form of looping definitely required
+- '+=' etc are surprisingly missed
+
+alternative syntax for func and proc declarations:
+
+proc # intypes # outtypes
+name # innames # outnames {
+  // do stuff
+}
+
+func(intypes) outtype
+name(innames) outname {
+  // do stuff
+}
+
+might also work and be nice as syntax for the respective types
+(realized that proc # intypes # outtypes does not nest very well)
+
+
+--------------------------
+
+librustc_trans/trans/foreign.rs has trans_native_call, which I'll
+probably want to steal for calling to C and stuff
+
+it seems that the representation of a C struct is trivial in llvm, at
+least I can't find anything that ensures it in any of the llvm based
+compilers I have looked into so far.
