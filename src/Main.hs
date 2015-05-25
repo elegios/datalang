@@ -44,14 +44,15 @@ testLLVMstuff = do
 writeModuleToObjectFile :: AST.Module -> FilePath -> IO ()
 writeModuleToObjectFile m p = asGeneralModule m $ \mod ->
   runExceptT (verify mod) >>= \case
-    Left mess -> putStrLn $ "Verifp error: " ++ mess
+    Left mess -> putStrLn $ "Verify error: " ++ mess
     Right _ -> do
-      putStrLn "result: "
+      putStrLn "Codegen done"
       writeObjectFile p mod
-      printModule mod
+      -- printModule mod
 
 writeObjectFile :: FilePath -> M.Module -> IO ()
-writeObjectFile path mod = failIO . withDefaultTargetMachine $ \mac -> failIO $ M.writeObjectToFile mac (M.File path) mod
+writeObjectFile path mod = failIO . withDefaultTargetMachine $ \mac ->
+  failIO $ M.writeObjectToFile mac (M.File path) mod
 
 printModule :: M.Module -> IO ()
 printModule mod = M.moduleLLVMAssembly mod >>= putStrLn
@@ -62,12 +63,8 @@ failIO e = runExceptT e >>= \r -> case r of
   Right a -> return a
 
 asGeneralModule :: AST.Module -> (M.Module -> IO a) -> IO a
-asGeneralModule mod monad = do
-  res <- withContext $ \context ->
-    runExceptT . M.withModuleFromAST context mod $ monad
-  case res of
-    Left mess -> fail mess
-    Right res -> return res
+asGeneralModule mod monad = withContext $ \context ->
+  failIO . M.withModuleFromAST context mod $ monad
 
 isRight :: Either a b -> Bool
 isRight Right{} = True

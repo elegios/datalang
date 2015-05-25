@@ -4,13 +4,13 @@ module CodeGen (generate) where
 
 import GlobalAst (Inline(..), getSizeFromTSize, nowhere, TerminatorType(..), BinOp(..), UnOp(..), TSize(..))
 import NameResolution.Ast (Resolved(..))
-import Inference.Ast (TypeKey, FlatType(..), CallableDef, CallableDefT(..), Statement, StatementT(..), Expression, ExpressionT(..), Literal(..), bool, CompoundAccess(..))
+import Inference.Ast (TypeKey, FlatType(..), CallableDef, CallableDefT(..), Statement, StatementT(..), Expression, ExpressionT(..), Literal(..), bool, CompoundAccess(..), representation, Default(..))
 import Control.Applicative ((<*>), Applicative)
 import Control.Lens hiding (op, index)
 import Control.Monad.State
 import Control.Monad.Except (ExceptT, runExceptT, MonadError, throwError)
 import Data.Either (partitionEithers)
-import Data.Maybe (fromJust)
+import Data.Maybe (fromMaybe)
 import Data.Functor ((<$>))
 import Data.List (find)
 import Data.Word (Word32, Word)
@@ -309,11 +309,13 @@ instance GenerateableWithOperand Expression where
     ft <- getFT t
     instr t False $ AST.Xor eOp (AST.ConstantOperand $ C.Int (getSize ft) (-1)) []
 
-  genO (CompoundAccess e (ExpandedMember m) _) = do
+  genO (CompoundAccess e (ExpandedMember m) r) = do
     Operand t pointable eOp <- genO e
     StructT ps <- getFT t
-    let (index, (_, it)) = fromJust . find ((m ==) . fst . snd) $ zip [0..] ps
+    let (index, (_, it)) = fromMaybe err
+                           (find ((m ==) . fst . snd) $ zip [(0::Integer)..] ps)
         con i = AST.ConstantOperand $ C.Int 32 i
+        err = error $ "Compiler error: could not find member " ++ m ++ " at " ++ show r ++ ", ps was " ++ show ps
     instr it pointable $ if pointable
                          then GetElementPtr True eOp [con 0, con index] []
                          else ExtractValue eOp [fromInteger index] []
@@ -324,8 +326,10 @@ instance GenerateableWithOperand Expression where
     -- TODO: extend indexT correctly depending on signedness
     instr it True $ GetElementPtr True ptrOp [indexOp] []
   genO (CompoundAccess e (Expanded repMap mCond repE) _) = do
+    let (def, ext) = M.partition ((== Default) . fst) repMap
+    prevLocals <- T.mapM (genO . snd) ext >>= (locals <<%=) . M.union
     prevContext <- genO e >>= (replacementContext <<.=)
-    prevLocals <- T.mapM genO repMap >>= (locals <<%=) . M.union
+    T.mapM (genO . snd) def >>= (locals %=) . M.union
     -- TODO: generate cond, set to explode or something
     ret <- genO repE
     locals .= prevLocals
@@ -469,7 +473,7 @@ requestCallable sig@(Global n, tk, inl) =
       n' <- makeName
       return . Right . AST.ConstantOperand $ C.GlobalReference t n'
   where
-    makeName = super . callableNames . at sig <?= Name (n ++ "#" ++ show tk ++ "#" ++ show inl)
+    makeName = super . callableNames . at sig <?= Name (n ++ "#" ++ show (representation tk) ++ "#" ++ (case inl of AlwaysInline -> "a"; UnspecifiedInline -> "u"; NeverInline -> "n"))
 
 unPoint :: Operand -> CodeGen Operand
 unPoint o@(Operand _ False _) = return o

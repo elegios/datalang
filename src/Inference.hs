@@ -42,7 +42,7 @@ data ILiteral s = ILit Integer (Inferred s) SourceRange
                 | StructTupleLit [IExpression s] (Inferred s) SourceRange
                 deriving Show
 
-type IRepMap s = M.Map Resolved (IExpression s, Inferred s)
+type IRepMap s = M.Map Resolved (Default, (IExpression s, Inferred s))
 data IAccess s = IMember String | IBracket [Either String (IExpression s, Inferred s)] deriving Show
 
 type ICompoundAccess s = STRef s (MaybeExpanded s)
@@ -202,7 +202,7 @@ infer (ResolvedSource tDefs cDefs) requests = runST $ flip evalStateT initSuperS
     runFinalizer st = lift . runExceptT . flip runStateT st
     inferRequest :: Int -> FinalizerState s -> M.Map (IRequest s) [IRequest s] -> Super s [Either ErrorMessage (CallableDef, M.Map TypeKey FlatType)]
     inferRequest _ _ todo | M.null todo = return []
-    inferRequest rid finSt todo = (done %= S.insert req) >> case trace ("requested " ++ show req) $ M.lookup fn cDefs of
+    inferRequest rid finSt todo = (done %= S.insert req) >> case {-trace ("requested " ++ show req) $-} M.lookup fn cDefs of
       Nothing -> error $ "Compiler error: could not find callable " ++ fn
       Just def -> runInferrer rid infmap (enter t >>= enterDef def) >>= \case
         Left e -> (Left e:) <$> inferRequest rid finSt rest
@@ -655,18 +655,18 @@ attemptCompoundExpand errF r = readRef r >>= \case
           match (pattern, rep) = (>>= expand retty rep) <$> inner pattern bp
           inner [] [] = Just $ return M.empty
           inner (P.BrId n _ : pTail) (Right rep : bpTail) =
-            (M.insert n rep <$>) <$> inner pTail bpTail
+            (M.insert n (External, rep) <$>) <$> inner pTail bpTail
           inner (P.BrId n (Just rep) : pTail) bpTail =
-            (M.insert n <$> enterT rep <*>) <$> inner pTail bpTail
+            (M.insert n . (Default,) <$> enterT rep <*>) <$> inner pTail bpTail
           inner (P.BrOp o : pTail) (Left o' : bpTail)
             | o == o' = inner pTail bpTail
           inner _ _ = Nothing
           err = errF $ show u ++ " has no []-expression matching " ++ show bp
-      Just u -> throwError . ErrorString $ show u ++ " has no []-expression matching " ++ show bp
+      Just u -> throwError . errF $ show u ++ " has no []-expression matching " ++ show bp
   u -> trace ("double expand of " ++ show u) $ return () -- NOTE: already expanded
   where
     expand retty (me, e) irepmap = do
-      prevLocals <- locals <<%= M.union (snd <$> irepmap)
+      prevLocals <- locals <<%= M.union (snd . snd <$> irepmap)
       me' <- T.mapM (enterT >=> \(e', et) -> unify errF IBool et >> return e') me
       (e', t) <- enterT e
       unify errF retty t
@@ -763,7 +763,7 @@ instance Finalizable (IExpression s) s Expression where
       access = \case
         IUnExpanded{} -> throwError . ErrorString $ "Compiler error: unexpanded compound at " ++ show r
         IExpanded repmap cond rep ->
-          Expanded <$> T.mapM (exit . fst) repmap <*> T.mapM exit cond <*> exit rep
+          Expanded <$> T.mapM (\(d,(e',_)) -> (d,) <$> exit e') repmap <*> T.mapM exit cond <*> exit rep
         IExpandedMember m -> return $ ExpandedMember m
         IExpandedSubscript index -> ExpandedSubscript <$> exit index
   exit (Variable n t r) = Variable n <$> convertType (exErr r) t <*> return r

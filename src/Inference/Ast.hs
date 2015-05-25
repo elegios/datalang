@@ -45,7 +45,8 @@ data ExpressionT t a l = Bin BinOp (ExpressionT t a l) (ExpressionT t a l) Sourc
                        | ExprLit l
                        deriving Show
 
-type RepMap = M.Map Resolved Expression
+data Default = Default | External deriving (Show, Eq)
+type RepMap = M.Map Resolved (Default, Expression)
 data CompoundAccess = Expanded RepMap (Maybe Expression) Expression
                     | ExpandedMember String
                     | ExpandedSubscript Expression
