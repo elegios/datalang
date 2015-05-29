@@ -1,8 +1,11 @@
 module CABI.Common where
 
+import Data.Maybe (fromJust)
 import Data.Generics.Uniplate.Direct
+import LLVM.General.AST (Name)
 import LLVM.General.AST.Type
 import LLVM.General.AST.Attribute (ParameterAttribute)
+import qualified Data.Map as M
 
 {-
 NOTE: this instance is actually incorrect compared to what one would
@@ -22,3 +25,8 @@ instance Uniplate Type where
 
 data Arg = Arg { kind :: ArgType, llvmType :: Type, attr :: Maybe ParameterAttribute, padding :: Maybe Type }
 data ArgType = Direct | Indirect deriving Eq
+
+removeNames :: M.Map Name Type -> Type -> Type
+removeNames tns = transform inner
+  where inner (NamedTypeReference n) = transform inner . fromJust $ M.lookup n tns
+        inner x = x

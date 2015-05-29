@@ -134,10 +134,10 @@ data FinalizerState s = FinalizerState
                         , _toInferred :: M.Map TypeKey (Inferred s)
                         }
 data SuperState s = SuperState
-                    { _done :: S.Set (IRequest s)
+                    { _done :: S.Set IRequest
                     }
 
-type IRequest s = RequestT TypeKey
+type IRequest = RequestT TypeKey
 type Request = RequestT P.Type
 type RequestT t = (Resolved, t)
 
@@ -165,13 +165,15 @@ makeLenses ''SuperState
 
 -- Big fat runner function
 
-infer :: ResolvedSource -> [Request] -> [Either ErrorMessage (CallableDef, M.Map TypeKey FlatType)]
+infer :: ResolvedSource -> [Request] -> Either [ErrorMessage] ([IRequest], [CallableDef], M.Map TypeKey FlatType)
 infer (ResolvedSource tDefs cDefs) requests = runST $ flip evalStateT initSuperState $
   runInferrer 0 M.empty (mapM convReq requests) >>= \case
-    Left e -> return [Left e]
+    Left e -> return $ Left [e]
     Right (rs, st) -> runFinalizer initFinalizerState (mapM convReq' rs) >>= \case
-      Left e -> return [Left e]
-      Right (rs', finSt) -> inferRequest (_refId st) finSt ((:[]) <$> mapWith id rs')
+      Left e -> return $ Left [e]
+      Right (rs', finSt) ->
+        fmap (\(a, b) -> (rs', a, b)) <$>
+          inferRequest (_refId st) finSt ((:[]) <$> mapWith id rs')
   where
     convReq (n, t) = (n,) <$> enter t
     convReq' (n, t) = (n,) <$> convertType fullyReifiedError t
@@ -200,23 +202,25 @@ infer (ResolvedSource tDefs cDefs) requests = runST $ flip evalStateT initSuperS
       }
     runInferrer rid infmap = lift . runExceptT . flip runStateT (basicInferrerState {_refId = rid, _toInferredMap = infmap})
     runFinalizer st = lift . runExceptT . flip runStateT st
-    inferRequest :: Int -> FinalizerState s -> M.Map (IRequest s) [IRequest s] -> Super s [Either ErrorMessage (CallableDef, M.Map TypeKey FlatType)]
-    inferRequest _ _ todo | M.null todo = return []
-    inferRequest rid finSt todo = (done %= S.insert req) >> case {-trace ("requested " ++ show req) $-} M.lookup fn cDefs of
+    inferRequest :: Int -> FinalizerState s -> M.Map IRequest [IRequest] -> Super s (Either [ErrorMessage] ([CallableDef], M.Map TypeKey FlatType))
+    inferRequest _ finSt todo | M.null todo = return $ Right ([], _flatTypes finSt)
+    inferRequest rid finSt todo = (done %= S.insert req) >> case trace ("requested " ++ show req) $ M.lookup fn cDefs of
       Nothing -> error $ "Compiler error: could not find callable " ++ fn
       Just def -> runInferrer rid infmap (enter t >>= enterDef def) >>= \case
-        Left e -> (Left e:) <$> inferRequest rid finSt rest
+        Left e -> addErr e <$> inferRequest rid finSt rest
         Right (def', st) -> runFinalizer finSt exiter >>= \case
-          Left e -> (Left e:) <$> inferRequest rid finSt rest
+          Left e -> addErr e <$> inferRequest rid finSt rest
           Right ((def'', reqs), finSt') -> do
             removeDone <- flip S.difference <$> use done
             let next = rest `M.union` ((:path) <$> mapWith id (S.toList nextList))
                 nextList = removeDone $ S.fromList reqs
                 rid' = _refId st
-            (Right (def'', _flatTypes finSt'):) <$> inferRequest rid' finSt' next
+            fmap (_1 %~ (def'':)) <$> inferRequest rid' finSt' next
           where
             exiter = (,) <$> exit def' <*> mapM (rightA $ convertType undefined) (_requestedGlobals st)
       where
+        addErr e (Left es) = Left $ e : es
+        addErr e _ = Left [e]
         ((req@(Global fn, t), path), rest) = M.deleteFindMin todo
         infmap = _toInferred finSt
 

@@ -17,6 +17,6 @@ func main
 -> ret {
   let a = {1, 0, 0} to Vector3
   let b = {0, 1, 0} to Vector3
-  ret = inline dot(a,b)
+  ret = inline dot(a, b)
   inline dotProc # a, b # ret
 }

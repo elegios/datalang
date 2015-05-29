@@ -1,0 +1,66 @@
+Assuming rust does this correctly, here are the rules for making
+things accurate for x86_64
+
+ints, pointers, floats and doubles are register types
+others are not
+
+i1 must have zext attribute on them
+
+a direct pass that is not a register type has a cast on it. indirect ones do not, merely a pointer
+
+non-register types are classified, then decided what to do with them, depening on the result of is_mem, which is is_pass_byval for arguments and is_ret_bysret for returntype
+
+classification determines the size of the type in words.
+    if words > 4 {all_mem(&mut cls); return cls;} // all_mem sets all classes to Memory
+
+otherwise classify and fixup
+
+classify makes each word into some class depending on what type we're matching on. Note that not all classes are set immediately, possibly just the first one even if the type takes up several
+
+Int and pointer becomes class int
+float becomes class SSEFv or SSEFs depending on the alignment (probably high and low in an SSE register)
+double becomes SSEDs
+struct has an entire extra routine to do it
+array does a classify for each element. here some offset is introduced
+vector sets a class depending on type (int -> SSEInt(int_width), float -> SSEFv, Double -> SSEDv), then sets all the later ones to SSEUp
+
+byval is true if the first element in the regclasses is Memory, X87 or ComplexX87
+bysret is true if the first element in the regclasses is Memory
+
+llreg_ty uses the entire list of classes to determine the actual llvmtype that should be passed. This type is some form of struct (a literal, not a named one) containing various types
+
+Memory seems to be rather contagious
+
+
+Testing some fairly manual things to see how they translate:
+
+i32 -> direct i32
+i1 -> zext i1
+{i32, i32} -> {i64}
+{i1, i1, i1} -> {i64}
+{i32, *i32, i8} -> sret or byval for an indirect thing
+{i8, i32} -> {i64}
+{f32, f32} -> < 2 x f32 >
+{f32, f32, f32, f32} -> {< 2 x f32 >, < 2 x f32 >}
+float -> float
+{f32, f64} -> {f32, f64}
+{f64, f32} -> {f64, f32}
+{f64, f64} -> {f64, f64}
+{f32, f32, f32} -> {< 2 x f32 >, f32}
+{i32, f32} -> {i64}
+{f32, i32} -> {i64}
+{i16, i16, i8, f32} -> {i64, f32}
+{i16, i16, i8, f32, f32} -> {i64, <2 x f32>}
+
+anything with a misaligned member is Memory. This will only happen when a packed struct is involved
+anything at more than 4 words is Memory
+anything not sse at 3 or more words is Memory (this means sse start, then the rest are SSEUp)
+
+if anything in a word is an int, make the word an int
+if a word is two f32 make a <2 x f32>
+a vector is passed as is, assuming it is not memory according to above
+arrays work like structs of the same composition
+
+rust does the conversion by using allocas and bitcasting pointers. This means some things must be placed on the stack (assuming no optimization later) instead of just modified straight up. It should however be optimized, assuming mem2reg is run. (turns out allocas shouldn't even need to be hoisted for this to work)
+
+an sret indirect return by pointer thing is placed first in the argument list.

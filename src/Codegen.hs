@@ -5,12 +5,13 @@ module CodeGen (generate) where
 import GlobalAst (Inline(..), getSizeFromTSize, nowhere, TerminatorType(..), BinOp(..), UnOp(..), TSize(..))
 import NameResolution.Ast (Resolved(..))
 import Inference.Ast (TypeKey, FlatType(..), CallableDef, CallableDefT(..), Statement, StatementT(..), Expression, ExpressionT(..), Literal(..), bool, CompoundAccess(..), representation, Default(..))
+import CABI.EntryPoint (FuncSpec(FuncSpec), DefinitionLocation(..), getCABI)
 import Control.Applicative ((<*>), Applicative)
 import Control.Lens hiding (op, index)
 import Control.Monad.State
 import Control.Monad.Except (ExceptT, runExceptT, MonadError, throwError)
 import Data.Either (partitionEithers)
-import Data.Maybe (fromMaybe)
+import Data.Maybe (fromMaybe, fromJust)
 import Data.Functor ((<$>))
 import Data.List (find)
 import Data.Word (Word32, Word)
@@ -62,7 +63,6 @@ data SuperState = SuperState
                   , _namedTypes :: M.Map TypeKey Type
                   , _types :: M.Map TypeKey FlatType
                   , _typeKeys :: M.Map FlatType TypeKey
-                  , _structCounter :: Int
                   }
 
 data Operand = Operand TypeKey Bool AST.Operand
@@ -77,56 +77,65 @@ makeLenses ''CodeGenState
 makeLenses ''SuperState
 makeLenses ''Defers
 
-generate :: [(CallableDef, M.Map TypeKey FlatType)] -> Either [ErrorMessage] AST.Module
-generate inferred = runSuper $ do
+generate :: String -> ([(Resolved, TypeKey)], [CallableDef], M.Map TypeKey FlatType) -> Either [ErrorMessage] AST.Module
+generate triple (reqs, inferred, ts) = runSuper $ do
+  types .= ts
+  let ftToTk = M.fromList . map swap $ M.toList ts
+      named = M.fromList . (`zip` newNames) . filter isStruct $ M.keys ftToTk
+      newNames = NamedTypeReference . Name . ("struct" ++) . show <$> [(0::Integer)..]
+      namedTs = fromJust . flip M.lookup named <$> M.filter isStruct ts
+  typeKeys .= ftToTk
+  namedTypes .= namedTs
+
   (errs, generated) <- partitionEithers <$> mapM genCallable inferred
   if null errs
-    then Right <$> finishGeneration (makeDefMap generated)
+    then Right <$> finishGeneration triple reqs (makeDefMap generated)
     else return $ Left errs
   where
+    isStruct StructT{} = True
+    isStruct _ = False
     runSuper = runIdentity . flip evalStateT initState
     initState = SuperState
                 { _callableNames = M.empty
                 , _namedTypes = M.empty
                 , _types = M.empty
                 , _typeKeys = M.empty
-                , _structCounter = 0
                 }
     getSig d = (Global $ callableName d, finalType d)
-    makeDefMap = M.fromList . zip (getSig . fst <$> inferred)
+    makeDefMap = M.fromList . zip (getSig <$> inferred)
 
-finishGeneration :: M.Map (Resolved, TypeKey) AST.Global -> Super AST.Module
-finishGeneration fdefs = do
-  functionDefs <- map makeF . M.toList <$> use callableNames
+finishGeneration :: String -> [(Resolved, TypeKey)] -> M.Map (Resolved, TypeKey) AST.Global -> Super AST.Module
+finishGeneration triple reqs fdefs = do
+  functionDefs <- map makeF . (map reqToSig reqs ++) . M.toList <$> use callableNames
   (nts, fts) <- unzip . M.elems
                 <$> (M.intersectionWith (,) <$> use namedTypes <*> use types)
   llvmts <- mapM fToLLVMType fts
+  let ntMap = M.fromList $ zip (map (\(NamedTypeReference n) -> n) nts) llvmts
+  reqFuncDefs <- forM reqs $ toFSpec >=> return . getCABI triple ntMap
   let typeDefs = zipWith makeT nts llvmts
       makeT (NamedTypeReference n) t = AST.TypeDefinition n $ Just t
-  return $ AST.defaultModule { AST.moduleDefinitions = functionDefs ++ typeDefs }
+  return $ AST.defaultModule { AST.moduleDefinitions = reqFuncDefs ++ functionDefs ++ typeDefs }
   where
+    reqToSig (r@(Global strN), t) = ((r, t, UnspecifiedInline), mangle strN t UnspecifiedInline)
     makeF ((r, t, i), n) = case M.lookup (r, t) fdefs of
       Nothing -> error $ "Compiler error, couldn't find function " ++ show (r, t)
-      Just f@G.Function{G.functionAttributes = attrs} -> AST.GlobalDefinition $ case i of
-        NeverInline -> f { G.name = n, G.functionAttributes = A.NoInline : attrs }
-        UnspecifiedInline -> f { G.name = n }
-        AlwaysInline -> f { G.name = n, G.functionAttributes = A.AlwaysInline : attrs }
+      Just f@G.Function{G.functionAttributes = attrs} -> AST.GlobalDefinition $
+        case i of
+          NeverInline -> f { G.name = n, G.functionAttributes = A.NoInline : attrs }
+          UnspecifiedInline -> f { G.name = n }
+          AlwaysInline -> f { G.name = n
+                            , G.functionAttributes = A.AlwaysInline : attrs }
+    toFSpec (Global n, t) = do
+      (retty, argTs) <- toLLVMType False t >>= \case
+        FunctionType VoidType args _ -> return (Nothing, args)
+        FunctionType ret is _ -> return (Just ret, is)
+      return $ FuncSpec retty argTs (Name n) (mangle n t UnspecifiedInline) InLanguage
 
 -- ###Callable generation starters
 
-genCallable :: (CallableDef, M.Map TypeKey FlatType) -> Super (Either ErrorMessage AST.Global)
-genCallable (d, ts) = do
-  prevTypes <- types <<.= ts
-  typeKeys .= M.fromList (map swap $ M.toList ts) -- TODO: possibly a more performant way to do this
-  let newToName = M.keys . M.filter isStruct $ M.difference ts prevTypes
-  firstN <- structCounter <<+= length newToName
-  let newNamed = M.fromAscList $ zip newToName newNames
-      newNames = NamedTypeReference . Name . ("struct" ++) . show <$> [firstN..]
-  namedTypes %= (`M.union` newNamed)
-  get >>= runCodeGen (codegenCallable d)
+genCallable :: CallableDef -> Super (Either ErrorMessage AST.Global)
+genCallable d = get >>= runCodeGen (codegenCallable d)
   where
-    isStruct StructT{} = True
-    isStruct _ = False
     runCodeGen m su = case run of
       Right (ret, CodeGenState{_super = st}) -> put st >> return (Right ret)
       Left e -> return $ Left e
@@ -235,6 +244,7 @@ instance Generateable Statement where
   gen (While cond stmnt _) = do
     (condName, bodyName, nextName) <- (,,) <$> newName <*> newName <*> newName
     prevTerminator <- currentBlock . blockTerminator <<.= (Do $ Br condName [])
+    prevLoopDefers <- defers . defersLoop <<.= []
 
     finalizeAndReplaceWith $ BasicBlock condName [] undefined
     Operand _ False condOp <- genO cond >>= unPoint
@@ -246,6 +256,7 @@ instance Generateable Statement where
     gen stmnt
     breakTarget .= prevBreak
     continueTarget .= prevContinue
+    defers . defersLoop .= prevLoopDefers
 
     finalizeAndReplaceWith $ BasicBlock nextName [] prevTerminator
   gen (Scope stmnts _) = do
@@ -473,7 +484,10 @@ requestCallable sig@(Global n, tk, inl) =
       n' <- makeName
       return . Right . AST.ConstantOperand $ C.GlobalReference t n'
   where
-    makeName = super . callableNames . at sig <?= Name (n ++ "#" ++ show (representation tk) ++ "#" ++ (case inl of AlwaysInline -> "a"; UnspecifiedInline -> "u"; NeverInline -> "n"))
+    makeName = super . callableNames . at sig <?= mangle n tk inl
+
+mangle :: String -> TypeKey -> Inline -> Name
+mangle n tk i = Name $ n ++ "#" ++ show (representation tk) ++ "#" ++ (case i of AlwaysInline -> "a"; UnspecifiedInline -> "u"; NeverInline -> "n")
 
 unPoint :: Operand -> CodeGen Operand
 unPoint o@(Operand _ False _) = return o

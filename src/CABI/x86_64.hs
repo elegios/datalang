@@ -1,6 +1,6 @@
 module CABI.X86_64 (convertFunc) where
 
-import CABI.Common (Arg(Arg), ArgType(..))
+import CABI.Common (Arg(Arg), ArgType(..), removeNames)
 import Control.Monad (forM_)
 import Control.Monad.Writer (WriterT, writer, execWriterT)
 import Control.Monad.State (StateT, modify, get, evalStateT)
@@ -9,8 +9,6 @@ import Data.Word (Word32)
 import Data.List (groupBy)
 import Data.Function (on)
 import Data.Functor ((<$>))
-import Data.Maybe (fromJust)
-import Data.Generics.Uniplate.Direct (transform)
 import LLVM.General.AST.Type
 import LLVM.General.AST (Name)
 import LLVM.General.AST.Attribute (ParameterAttribute(SRet, ByVal))
@@ -32,6 +30,7 @@ convertType nts attr t
     Nothing -> Arg Indirect t (Just attr) Nothing
     Just llvmts -> case findWordType <$> groupWords llvmts of
       [v@VectorType{}] -> Arg Direct v Nothing Nothing
+      ts -> Arg Direct (StructureType False ts) Nothing Nothing
   where
     numWords = (typeSize t + wordSize - 1) `div` wordSize
     unnamedT = removeNames nts t
@@ -95,8 +94,3 @@ align t v = ((v + a - 1) `div` a) * a
 
 isAligned :: Type -> Word32 -> Bool
 isAligned t v = (v `mod` typeAlign t) == 0
-
-removeNames :: M.Map Name Type -> Type -> Type
-removeNames tns = transform inner
-  where inner (NamedTypeReference n) = transform inner . fromJust $ M.lookup n tns
-        inner x = x

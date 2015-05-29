@@ -20,6 +20,7 @@ import LLVM.General.Context
 import LLVM.General.Target
 import LLVM.General.Analysis (verify)
 import Control.Monad.Except (runExceptT, ExceptT(..))
+import qualified Data.Map as Map
 
 -- main :: IO ()
 main = do
@@ -29,20 +30,25 @@ main = do
   resolved <- either (fail . show) return $ resolveNames source
   putStrLn "Name resolution done"
   let inferred = infer resolved [(Global "main", FuncT [] (IntT S32 nowhere) nowhere)]
-      (errors, successes) = partitionEithers inferred
-  unless (null errors) . fail $ show errors
-  putStrLn "Inference done"
-  case generate successes of -- TODO: main is never requested an will thus never be generated
-    Left errors -> fail $ show errors
-    Right m -> writeModuleToObjectFile m $ replaceExtension sourceFile "o"
+  case inferred of
+    Left errs -> fail $ show errs
+    Right success@(_, _, ts) -> do
+      putStrLn "Inference done"
+      mapM_ print $ Map.toList ts
+      triple <- getDefaultTargetTriple
+      case generate triple success of
+        Left errors -> fail $ show errors
+        Right m -> writeModuleToObjectFile m $ replaceExtension sourceFile "o"
   return inferred
 
 testLLVMstuff = do
   initializeAllTargets
   failIO $ withDefaultTargetMachine getTargetMachineDataLayout
+  getDefaultTargetTriple
 
 writeModuleToObjectFile :: AST.Module -> FilePath -> IO ()
 writeModuleToObjectFile m p = asGeneralModule m $ \mod ->
+  -- printModule mod >>
   runExceptT (verify mod) >>= \case
     Left mess -> putStrLn $ "Verify error: " ++ mess
     Right _ -> do
