@@ -2,8 +2,6 @@
 
 module Parser (parseFile) where
 
--- TODO: make whitespace set a flag when it encounters a newline. Make a 'noNewline' parser that uses this. Also a 'wasNewlineOrSemi' for statement separation
-
 import Parser.Ast
 import GlobalAst (SourceLoc(..), SourceRange(..), TSize(..), BinOp(..), UnOp(..), TerminatorType(..), Inline(..), location)
 import Data.Functor ((<$>), (<$))
@@ -123,7 +121,6 @@ varInit = withPosition (VarInit <$> (reserved "let" >> mutable) <*> identifier <
 expression :: Parser Expression
 expression = buildExpressionParser expressionTable simpleExpression <?> "expression"
 
--- TODO: implement all operators, or implement them as something else
 type ExpOp = Operator StreamType StateType UnderlyingMonad Expression
 expressionTable :: [[ExpOp]]
 expressionTable =
@@ -141,7 +138,7 @@ expressionTable =
   , [bin "||" ShortOr]
   ]
 
--- TODO: pretty ugly range here, it only covers the operator, not both expressions and the operator
+-- FIXME: pretty ugly range here, it only covers the operator, not both expressions and the operator
 bin :: String -> BinOp -> ExpOp
 bin name op = Infix (withPosition $ (\s e1 e2 -> Bin op e1 e2 s) <$ reservedOp name) AssocLeft
 

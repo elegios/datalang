@@ -496,12 +496,12 @@ be saved for later.
 points where linebreaks do not break
 - right after a prefix, before the expression
 - right after a binop, before the second expression
-- inside parenthesis -- TODO
+- inside parenthesis
 - directly after "=" (in varinit and shallowcopy)
 - after let, before expression
 - after mut, before expression
 - after :, in type assertion
-- in type literal -- TODO
+- in type literal
 - after defer, before statement
 
 ------------------------

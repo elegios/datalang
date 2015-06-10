@@ -22,6 +22,22 @@ import LLVM.General.Analysis (verify)
 import Control.Monad.Except (runExceptT, ExceptT(..))
 import qualified Data.Map as Map
 
+-- TODO: Some form of namespaces
+-- TODO: Constant support
+-- TODO: Function overloading and selection
+
+-- TODO: More fancy pointers
+-- TODO: Find and prevent infinite recursive structures
+-- TODO: Strings
+-- TODO: Algebraic types (as tagged unions?)
+
+-- TODO: For, possibly for-each
+-- TODO: Switch, match or pattern match
+-- TODO: Delete/Heap/Stack?
+
+-- TODO: Bitcast, conversion.
+-- TODO: Allow calling of functionpointers
+
 -- main :: IO ()
 main = do
   sourceFile : _ <- getArgs
