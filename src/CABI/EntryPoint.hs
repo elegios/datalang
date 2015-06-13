@@ -1,4 +1,4 @@
-{-# LANGUAGE TupleSections #-}
+{-# LANGUAGE TupleSections, FlexibleInstances #-}
 
 module CABI.EntryPoint
 ( FuncSpec(..)
@@ -10,11 +10,15 @@ import CABI.Common
 import Data.Functor ((<$>))
 import Data.Maybe (fromMaybe, maybeToList)
 import Data.Word (Word)
+import Data.Monoid (Monoid)
 import Control.Applicative ((<*))
-import Control.Monad.Writer (Writer, writer, runWriter)
-import Control.Monad.State (StateT, modify, get, execStateT, evalStateT)
-import LLVM.General.AST (Name(..), Named(..), Instruction(..))
-import LLVM.General.AST.Type (Type, void, ptr)
+import Control.Monad (forM)
+import Control.Monad.Writer (Writer, writer, runWriter, WriterT, execWriterT)
+import Control.Monad.State (StateT, modify, get, evalStateT)
+import Control.Monad.Trans (lift)
+import LLVM.General.AST (Name(..), Named(..), Instruction(..), Operand(..), Parameter(..), Terminator(Ret), Definition(GlobalDefinition))
+import LLVM.General.AST.Type (Type(FunctionType), void, ptr)
+import LLVM.General.AST.Global (BasicBlock(BasicBlock))
 import qualified CABI.X86_64 as X86_64
 import qualified Data.Map as M
 import qualified Data.Traversable as T
@@ -42,9 +46,9 @@ getCABI triple nts spec =
   where
     call s f = f nts (retty s) (argTs s)
 
-generate :: FuncSpec -> (Maybe Arg, [Arg]) -> AST.Definition
+generate :: FuncSpec -> (Maybe Arg, [Arg]) -> Definition
 generate f@FuncSpec{ definitionLocation = InLanguage } (mRet, is) =
-  AST.GlobalDefinition $ G.functionDefaults
+  GlobalDefinition $ G.functionDefaults
   { G.name = nonMangled f
   , G.returnType = case mRet of
                     Just (Arg Direct t _ _) -> t
@@ -52,70 +56,74 @@ generate f@FuncSpec{ definitionLocation = InLanguage } (mRet, is) =
   , G.returnAttributes = case mRet of
                           Just (Arg Direct _ (Just a) _) -> [a]
                           _ -> []
-  , G.parameters = (addRetParam params, False)
-  , G.basicBlocks = [AST.BasicBlock (Name "conv") (callPrepInstrs ++ [call] ++ afterCallInstrs) ret]
+  , G.parameters = (addRetParam parameters, False)
+  , G.basicBlocks = [BasicBlock (Name "conv") instrs ret]
   }
   where
     addRetParam = case mRet of
       Just (Arg Indirect t mAttr _) -> (G.Parameter t (UnName 0) (maybeToList mAttr) :) -- TODO: is the return argument allowed to have padding before it?
       _ -> id
-    (nAfterParams, (paramOps, params)) = run 1 $ mapM_ paramF is
-    paramF :: Arg -> GenMon AST.Operand G.Parameter ()
-    paramF (Arg k t a padT) = do
-      T.forM padT $ \padT' -> do
+    run :: EntryMonad a -> (a, [Named Instruction])
+    run = runWriter . flip evalStateT 1
+    ((parameters, ret), instrs) = run $ do
+      -- Construct the list of parameters
+      (paramOps, params) <- execWriterT . forM is $ \(Arg k t a padT) -> do
+        T.forM padT $ \padT' -> do
+          n <- freshName
+          writer ((), ([], [Parameter padT' n []]))
         n <- freshName
-        writeB $ G.Parameter padT' n []
-      n <- freshName
-      let t' = if k == Indirect then ptr t else t
-      writeB . G.Parameter t' n $ maybeToList a
-      writeA $ AST.LocalReference t' n
-    run firstN = runWriter . flip execStateT firstN
-    freshName :: GenMon a b Name
-    freshName = (UnName <$> get) <* modify (+1)
-    writeA :: a -> GenMon a b ()
-    writeA a = writer ((), ([a], []))
-    writeB :: b -> GenMon a b ()
-    writeB b = writer ((), ([], [b]))
-    instr :: Type -> Instruction -> GenMon a (Named Instruction) AST.Operand
-    instr t instruction = do
-      n <- freshName
-      writeB $ n := instruction
-      return $ AST.LocalReference t n
-    uinstr instruction = writeB $ Do instruction
-    (nAfterCallPrep, (callParamOps, callPrepInstrs)) =
-      run nAfterParams . mapM_ gen $ zip3 paramOps (argTs f) is
-    call = (case mRet of
-      Nothing -> Do
-      Just _ -> (UnName nAfterCallPrep :=)) $
-           Call False CC.Fast [] (Right callable) ((,[]) <$> callParamOps) [] []
-      where
-        (args, n) = (argTs f, mangled f)
-        callable = AST.ConstantOperand $
-                   C.GlobalReference (AST.FunctionType r args False) n
-        r = fromMaybe void $ retty f
-    gen :: (AST.Operand, Type, Arg) -> GenMon AST.Operand (Named Instruction) ()
-    gen (argOp, inlangT, Arg k externT _ _) = do
-      ptrOp <- case k of
-        Indirect -> return argOp
-        Direct -> do
-          allocaOp <- instr (ptr externT) $ Alloca externT Nothing 0 []
-          uinstr $ Store False allocaOp argOp Nothing 0 []
-          return allocaOp
-      castPtr <- instr (ptr inlangT) $ BitCast ptrOp (ptr inlangT) []
-      instr inlangT (Load False castPtr Nothing 0 []) >>= writeA
-    (ret, (_, afterCallInstrs)) = runWriter . flip evalStateT (nAfterCallPrep + 1) $
-      case (mRet, retty f) of
+        let t' = if k == Indirect then ptr t else t
+        writer ((), ([LocalReference t' n], [Parameter t' n $ maybeToList a]))
+
+      -- Bitcast the parameters to conform to the inlang types
+      let (args, n, r) = (argTs f, mangled f, fromMaybe void $ retty f)
+          callable = ConstantOperand $ C.GlobalReference (FunctionType r args False) n
+      argOps <- forM (zip3 paramOps args is) $ \(argOp, inlangT, Arg k externT _ _) -> do
+        ptrOp <- case k of
+          Indirect -> return argOp
+          Direct -> do
+            allocaOp <- instr (ptr externT) $ Alloca externT Nothing 0 []
+            uinstr $ Store False allocaOp argOp Nothing 0 []
+            return allocaOp
+        castPtr <- instr (ptr inlangT) $ BitCast ptrOp (ptr inlangT) []
+        instr inlangT (Load False castPtr Nothing 0 [])
+
+      -- Call function, then fixup returns
+      (params,) <$> case (mRet, retty f) of
         (Just (Arg Indirect externT _ _), Just inlangT) -> do
-          let retPtrOp = AST.LocalReference (ptr externT) $ UnName 0
+          callOp <- instr inlangT $ Call False CC.Fast [] (Right callable) ((,[]) <$> argOps) [] []
+          let retPtrOp = LocalReference (ptr externT) $ UnName 0
           castPtr <- instr (ptr inlangT) $ BitCast retPtrOp (ptr inlangT) []
-          uinstr $ Store False castPtr (AST.LocalReference inlangT $ UnName nAfterCallPrep) Nothing 0 []
-          return . Do $ AST.Ret (Just retPtrOp) []
+          uinstr $ Store False castPtr callOp Nothing 0 []
+          return . Do $ Ret Nothing []
         (Just (Arg Direct externT _ _), Just inlangT) -> do
+          callOp <- instr inlangT $ Call False CC.Fast [] (Right callable) ((,[]) <$> argOps) [] []
           allocaOp <- instr (ptr externT) $ Alloca externT Nothing 0 []
           castPtr <- instr (ptr inlangT) $ BitCast allocaOp (ptr inlangT) []
-          uinstr $ Store False castPtr (AST.LocalReference inlangT $ UnName nAfterCallPrep) Nothing 0 []
+          uinstr $ Store False castPtr callOp Nothing 0 []
           retOp <- instr externT $ Load False allocaOp Nothing 0 []
-          return . Do $ AST.Ret (Just retOp) []
-        _ -> return . Do $ AST.Ret Nothing []
+          return . Do $ Ret (Just retOp) []
+        _ -> do
+          uinstr $ Call False CC.Fast [] (Right callable) ((,[]) <$> argOps) [] []
+          return . Do $ Ret Nothing []
 
-type GenMon a b i = StateT Word (Writer ([a], [b])) i
+generate f@FuncSpec{ definitionLocation = External } (mRet, is) = undefined -- TODO
+
+class Monad m => GlueGen m where
+  liftGlue :: EntryMonad a -> m a
+  instr :: Type -> Instruction -> m Operand
+  instr t instruction = do
+    n <- freshName
+    liftGlue $ writer ((), [n := instruction])
+    return $ LocalReference t n
+  uinstr :: Instruction -> m ()
+  uinstr instruction = liftGlue $ writer ((), [Do instruction])
+  freshName :: m Name
+  freshName = liftGlue $ (UnName <$> get) <* modify (+1)
+
+instance GlueGen (StateT Word (Writer [Named Instruction])) where
+  liftGlue = id
+instance Monoid a => GlueGen (WriterT a (StateT Word (Writer [Named Instruction]))) where
+  liftGlue = lift
+
+type EntryMonad a = StateT Word (Writer [Named Instruction]) a
