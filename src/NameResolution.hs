@@ -1,4 +1,4 @@
-{-# LANGUAGE TemplateHaskell, TupleSections, LambdaCase #-}
+{-# LANGUAGE TemplateHaskell, TupleSections, LambdaCase, FlexibleInstances #-}
 
 module NameResolution (resolveNames) where
 
@@ -29,11 +29,13 @@ type Resolver a = StateT ResolverState (ExceptT ErrorMessage Identity) a
 makeLenses ''ResolverState
 
 resolveNames :: SourceFileT String -> Either [ErrorMessage] ResolvedSource
-resolveNames (SourceFile tDefs cDefs) = eResolvedFile
+resolveNames (SourceFile tDefs cDefs cImps cExps) = eResolvedFile
   where
-    eResolvedFile = fmap ResolvedSource tMap `mergeApply` cMap
+    eResolvedFile = fmap ResolvedSource tMap `mergeApply` cMap `mergeApply` eCImps `mergeApply` eCExps
     (tMap, cMap) = (mapWith typeName <$> eTypes, mapWith callableName <$> eCallables)
     eCallables = foldEithers $ run . resolve <$> cDefs
+    eCImps = foldEithers $ run . resolve <$> cImps
+    eCExps = foldEithers $ run . resolve <$> cExps
     eTypes = case checkTypeDefs tDefs of
       [] -> foldEithers $ map (run . resolveTypeDef (mapWith typeName tDefs)) tDefs
       es -> Left es
@@ -61,6 +63,9 @@ define sr n r@(Local d _) =
   (scope . at n <<.= Just r) >>= \case
     Just (Local d' _) | d == d' -> throwError . ErrorString $ "Redefinition of " ++ n ++ " at " ++ show sr
     _ -> return ()
+
+instance Resolvable (RequestT Type) where
+  resolve (Request n n' t) = return $ Request (Global n) n' t -- TODO: different with modules/namespaces
 
 instance Resolvable CallableDefT where
   resolve d@FuncDef{ inargs = is

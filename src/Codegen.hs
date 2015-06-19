@@ -5,6 +5,7 @@ module CodeGen (generate) where
 import GlobalAst (Inline(..), getSizeFromTSize, nowhere, TerminatorType(..), BinOp(..), UnOp(..), TSize(..))
 import NameResolution.Ast (Resolved(..))
 import Inference.Ast (TypeKey, FlatType(..), CallableDef, CallableDefT(..), Statement, StatementT(..), Expression, ExpressionT(..), Literal(..), bool, CompoundAccess(..), representation, Default(..))
+import Parser.Ast (RequestT(..))
 import CABI.EntryPoint (FuncSpec(FuncSpec), DefinitionLocation(..), getCABI)
 import Control.Applicative ((<*>), Applicative)
 import Control.Lens hiding (op, index)
@@ -77,8 +78,8 @@ makeLenses ''CodeGenState
 makeLenses ''SuperState
 makeLenses ''Defers
 
-generate :: String -> ([(Resolved, TypeKey)], [CallableDef], M.Map TypeKey FlatType) -> Either [ErrorMessage] AST.Module
-generate triple (reqs, inferred, ts) = runSuper $ do
+generate :: String -> ([RequestT TypeKey Resolved], [RequestT TypeKey Resolved], [CallableDef], M.Map TypeKey FlatType) -> Either [ErrorMessage] AST.Module
+generate triple (exter, reqs, inferred, ts) = runSuper $ do
   types .= ts
   let ftToTk = M.fromList . map swap $ M.toList ts
       named = M.fromList . (`zip` newNames) . filter isStruct $ M.keys ftToTk
@@ -87,11 +88,19 @@ generate triple (reqs, inferred, ts) = runSuper $ do
   typeKeys .= ftToTk
   namedTypes .= namedTs
 
+  let externCallNames = M.fromList $
+        (\i (r@(Global n),t) -> ((r,t,i), mangle n t UnspecifiedInline))
+        <$> [AlwaysInline, UnspecifiedInline, NeverInline]
+        <*> (toTup <$> exter)
+  callableNames .= externCallNames
   (errs, generated) <- partitionEithers <$> mapM genCallable inferred
+  callableNames %= (`M.difference` externCallNames)
+
   if null errs
-    then Right <$> finishGeneration triple reqs (makeDefMap generated)
+    then Right <$> finishGeneration triple exter reqs (makeDefMap generated)
     else return $ Left errs
   where
+    toTup (Request n _ t) = (n, t)
     isStruct StructT{} = True
     isStruct _ = False
     runSuper = runIdentity . flip evalStateT initState
@@ -104,32 +113,36 @@ generate triple (reqs, inferred, ts) = runSuper $ do
     getSig d = (Global $ callableName d, finalType d)
     makeDefMap = M.fromList . zip (getSig <$> inferred)
 
-finishGeneration :: String -> [(Resolved, TypeKey)] -> M.Map (Resolved, TypeKey) AST.Global -> Super AST.Module
-finishGeneration triple reqs fdefs = do
+finishGeneration :: String -> [RequestT TypeKey Resolved] -> [RequestT TypeKey Resolved]-> M.Map (Resolved, TypeKey) AST.Global -> Super AST.Module
+finishGeneration triple exter reqs fdefs = do
   functionDefs <- map makeF . (map reqToSig reqs ++) . M.toList <$> use callableNames
   (nts, fts) <- unzip . M.elems
                 <$> (M.intersectionWith (,) <$> use namedTypes <*> use types)
   llvmts <- mapM fToLLVMType fts
   let ntMap = M.fromList $ zip (map (\(NamedTypeReference n) -> n) nts) llvmts
-  reqFuncDefs <- forM reqs $ toFSpec >=> return . getCABI triple ntMap
+  -- TODO: integrate functions with external definitions, make them callable and ensure they will be generated
+  reqs' <- forM reqs $ toFSpec InLanguage
+  exter' <- forM exter $ toFSpec InC
   let typeDefs = zipWith makeT nts llvmts
       makeT (NamedTypeReference n) t = AST.TypeDefinition n $ Just t
-  return $ AST.defaultModule { AST.moduleDefinitions = reqFuncDefs ++ functionDefs ++ typeDefs }
+      cabiFuncDefs = getCABI triple ntMap <$> reqs' ++ exter'
+  return $ AST.defaultModule { AST.moduleDefinitions = concat (functionDefs : typeDefs : cabiFuncDefs) }
   where
-    reqToSig (r@(Global strN), t) = ((r, t, UnspecifiedInline), mangle strN t UnspecifiedInline)
+    reqToSig (Request r@(Global strN) _ t) = ((r, t, UnspecifiedInline), mangle strN t UnspecifiedInline)
     makeF ((r, t, i), n) = case M.lookup (r, t) fdefs of
-      Nothing -> error $ "Compiler error, couldn't find function " ++ show (r, t)
+      Nothing -> error $ "Compiler error, couldn't find function " ++ show (r, t) ++ " in map " ++ show fdefs
       Just f@G.Function{G.functionAttributes = attrs} -> AST.GlobalDefinition $
         case i of
-          NeverInline -> f { G.name = n, G.functionAttributes = A.NoInline : attrs }
+          NeverInline -> f { G.name = n
+                           , G.functionAttributes = A.NoInline : attrs }
           UnspecifiedInline -> f { G.name = n }
           AlwaysInline -> f { G.name = n
                             , G.functionAttributes = A.AlwaysInline : attrs }
-    toFSpec (Global n, t) = do
+    toFSpec loc (Request (Global n) cname t) = do
       (retty, argTs) <- toLLVMType False t >>= \case
         FunctionType VoidType args _ -> return (Nothing, args)
         FunctionType ret is _ -> return (Just ret, is)
-      return $ FuncSpec retty argTs (Name n) (mangle n t UnspecifiedInline) InLanguage
+      return $ FuncSpec retty argTs (Name cname) (mangle n t UnspecifiedInline) loc
 
 -- ###Callable generation starters
 

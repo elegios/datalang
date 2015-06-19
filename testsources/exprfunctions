@@ -11,6 +11,7 @@ func main
   }
   other # a # a
   a = a + 2
+  // supposed returnvalue: 4
 }
 
 proc other

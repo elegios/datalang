@@ -9,7 +9,12 @@ type SourceFile = SourceFileT String
 data SourceFileT v = SourceFile
   { typeDefinitions :: [TypeDefT v]
   , callableDefinitions :: [CallableDefT v]
+  , cImportDefinitions :: [RequestT Type v]
+  , cExportDefinitions :: [RequestT Type v]
   }
+
+type Request = RequestT String Type
+data RequestT t v = Request v String t deriving (Eq, Ord)
 
 data HiddenIdentifiers = HideAll | HideSome [String] deriving Show
 type Replacement v = (Maybe (ExpressionT v), ExpressionT v)

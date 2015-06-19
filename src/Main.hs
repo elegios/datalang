@@ -45,11 +45,10 @@ main = do
   putStrLn "Parse done"
   resolved <- either (fail . show) return $ resolveNames source
   putStrLn "Name resolution done"
-  let inferred = infer resolved [(Global "main", FuncT [] (IntT S32 nowhere) nowhere)]
+  let inferred = infer resolved
   case inferred of
     Left errs -> fail $ show errs
-    Right success@(_, _, ts) -> do
-      putStrLn "Inference done"
+    Right success@(_, _, _, ts) -> do
       mapM_ print $ Map.toList ts
       triple <- getDefaultTargetTriple
       case generate triple success of

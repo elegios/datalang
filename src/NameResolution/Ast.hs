@@ -20,4 +20,6 @@ data Resolved = Local
 data ResolvedSource = ResolvedSource
   { types :: M.Map String (TypeDefT Resolved)
   , callables :: M.Map String (CallableDefT Resolved)
+  , cImports :: [RequestT Type Resolved]
+  , cExports :: [RequestT Type Resolved]
   }

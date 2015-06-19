@@ -3,7 +3,7 @@
 module Parser (parseFile) where
 
 import Parser.Ast
-import GlobalAst (SourceLoc(..), SourceRange(..), TSize(..), BinOp(..), UnOp(..), TerminatorType(..), Inline(..), location)
+import GlobalAst (SourceLoc(..), SourceRange(..), TSize(..), BinOp(..), UnOp(..), TerminatorType(..), Inline(..), location, nowhere)
 import Data.Functor ((<$>), (<$))
 import Data.Char (isLower, isUpper)
 import Data.Either (partitionEithers)
@@ -53,7 +53,7 @@ parseFile path = runParser sourceParser initState path <$> LIO.readFile path
     initState = ParseState (error "Compiler error: haven't parsed anything, thus cannot find the end position of a thing") True
 
 sourceParser :: Parser SourceFile
-sourceParser = whiteSpace >> SourceFile <$> many typeDef <*> many callableDef <* eof
+sourceParser = whiteSpace >> SourceFile <$> many typeDef <*> many callableDef <*> return [] <*> return [Request "main" "main" $ FuncT [] (IntT S32 nowhere) nowhere] <* eof -- TODO: actual c imports and exports
 
 callableDef :: Parser CallableDef
 callableDef = withPosition $

@@ -5,7 +5,7 @@ module Inference (infer) where
 import GlobalAst (SourceRange(..), TSize(..), BinOp(..), UnOp(..), location)
 import Inference.Ast hiding (Literal(..))
 import NameResolution.Ast
-import Parser.Ast (HiddenIdentifiers)
+import Parser.Ast (HiddenIdentifiers, RequestT(..))
 import Data.Maybe (fromJust, isJust, isNothing, fromMaybe)
 import Data.Functor ((<$>))
 import Data.STRef
@@ -134,12 +134,10 @@ data FinalizerState s = FinalizerState
                         , _toInferred :: M.Map TypeKey (Inferred s)
                         }
 data SuperState s = SuperState
-                    { _done :: S.Set IRequest
+                    { _done :: S.Set (Resolved, TypeKey)
                     }
 
-type IRequest = RequestT TypeKey
-type Request = RequestT P.Type
-type RequestT t = (Resolved, t)
+type IRequest = P.RequestT TypeKey Resolved
 
 -- Basic instances
 
@@ -165,18 +163,21 @@ makeLenses ''SuperState
 
 -- Big fat runner function
 
-infer :: ResolvedSource -> [Request] -> Either [ErrorMessage] ([IRequest], [CallableDef], M.Map TypeKey FlatType)
-infer (ResolvedSource tDefs cDefs) requests = runST $ flip evalStateT initSuperState $
-  runInferrer 0 M.empty (mapM convReq requests) >>= \case
+infer :: ResolvedSource -> Either [ErrorMessage] ([IRequest], [IRequest], [CallableDef], M.Map TypeKey FlatType)
+infer (ResolvedSource tDefs cDefs cImps cExps) = runST $ flip evalStateT initSuperState $
+  runInferrer 0 M.empty ((,) <$> mapM convReq cImps <*> mapM convReq cExps) >>= \case
     Left e -> return $ Left [e]
-    Right (rs, st) -> runFinalizer initFinalizerState (mapM convReq' rs) >>= \case
-      Left e -> return $ Left [e]
-      Right (rs', finSt) ->
-        fmap (\(a, b) -> (rs', a, b)) <$>
-          inferRequest (_refId st) finSt ((:[]) <$> mapWith id rs')
+    Right ((is, es), st) ->
+      runFinalizer initFinalizerState ((,) <$> mapM convReq' is <*> mapM convReq' es)
+      >>= \case
+        Left e -> return $ Left [e]
+        Right ((is', es'), finSt) ->
+          fmap (\(a, b) -> (is', es', a, b)) <$>
+          inferRequest (_refId st) finSt (fmap (:[]) . mapWith id $ toTup <$> es')
   where
-    convReq (n, t) = (n,) <$> enter t
-    convReq' (n, t) = (n,) <$> convertType fullyReifiedError t
+    toTup (Request n _ t) = (n, t)
+    convReq (Request n n' t) = Request n n' <$> enter t
+    convReq' (Request n n' t) = Request n n' <$> convertType fullyReifiedError t
     fullyReifiedError m = ErrorString $ "All requested types must be fully reified: " ++ m
     initSuperState = SuperState
       { _done = S.empty
@@ -202,7 +203,7 @@ infer (ResolvedSource tDefs cDefs) requests = runST $ flip evalStateT initSuperS
       }
     runInferrer rid infmap = lift . runExceptT . flip runStateT (basicInferrerState {_refId = rid, _toInferredMap = infmap})
     runFinalizer st = lift . runExceptT . flip runStateT st
-    inferRequest :: Int -> FinalizerState s -> M.Map IRequest [IRequest] -> Super s (Either [ErrorMessage] ([CallableDef], M.Map TypeKey FlatType))
+    inferRequest :: Int -> FinalizerState s -> M.Map (Resolved, TypeKey) [(Resolved, TypeKey)] -> Super s (Either [ErrorMessage] ([CallableDef], M.Map TypeKey FlatType))
     inferRequest _ finSt todo | M.null todo = return $ Right ([], _flatTypes finSt)
     inferRequest rid finSt todo = (done %= S.insert req) >> case trace ("requested " ++ show req) $ M.lookup fn cDefs of
       Nothing -> error $ "Compiler error: could not find callable " ++ fn
