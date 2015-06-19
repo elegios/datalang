@@ -4,18 +4,20 @@ module Main where
 
 import GlobalAst (TSize(S32), nowhere)
 import Parser (parseFile)
-import Parser.Ast (Type(FuncT, IntT))
+import Parser.Ast (Type(FuncT, IntT), cImportDefinitions)
 import NameResolution (resolveNames)
 import NameResolution.Ast (Resolved(Global))
 import Inference (infer)
 import CodeGen (generate)
 import Data.Functor ((<$>))
+import Data.List (intercalate)
 import Control.Monad (unless)
 import Data.Either (partitionEithers)
 import System.Environment (getArgs)
 import System.FilePath (replaceExtension)
 import qualified LLVM.General.AST as AST
 import qualified LLVM.General.Module as M
+import LLVM.General.PrettyPrint
 import LLVM.General.Context
 import LLVM.General.Target
 import LLVM.General.Analysis (verify)
@@ -53,7 +55,7 @@ main = do
       triple <- getDefaultTargetTriple
       case generate triple success of
         Left errors -> fail $ show errors
-        Right m -> writeModuleToObjectFile m $ replaceExtension sourceFile "o"
+        Right m -> (writeModuleToObjectFile m $ replaceExtension sourceFile "o")
   return inferred
 
 testLLVMstuff = do

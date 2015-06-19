@@ -14,7 +14,7 @@ data SourceFileT v = SourceFile
   }
 
 type Request = RequestT Type String
-data RequestT t v = Request v String t deriving (Eq, Ord)
+data RequestT t v = Request v String t deriving (Eq, Ord, Show)
 
 data HiddenIdentifiers = HideAll | HideSome [String] deriving Show
 type Replacement v = (Maybe (ExpressionT v), ExpressionT v)

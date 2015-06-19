@@ -39,7 +39,8 @@ resolveNames (SourceFile tDefs cDefs cImps cExps) = eResolvedFile
     eTypes = case checkTypeDefs tDefs of
       [] -> foldEithers $ map (run . resolveTypeDef (mapWith typeName tDefs)) tDefs
       es -> Left es
-    names = callableName <$> cDefs
+    names = (callableName <$> cDefs) ++ (inLangName <$> cImps)
+    inLangName (Request n _ _) = n
     initState = ResolverState 0 $ M.fromList . zip names $ Global <$> names
     mergeApply (Left e1) (Left e2) = Left $ e1 ++ e2
     mergeApply (Left e) _ = Left e

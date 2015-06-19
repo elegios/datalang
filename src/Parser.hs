@@ -128,8 +128,8 @@ procCall = withPosition ((spec <|> unspec) <*> is <*> os) <?> "proc call"
                 replace reserved "noinline" NeverInline)
            <*> expression <* char '#'
     unspec = try (ProcCall UnspecifiedInline <$> expression <* char '#')
-    is = whiteSpace >> commaSep expression
-    os = option [] $ symbol "#" >> commaSep expression
+    is = whiteSpace >> option [] (noNewline >> commaSep expression)
+    os = option [] $ symbol "#" >> option [] (noNewline >> commaSep expression)
 
 defer :: Parser Statement
 defer = withPosition (reserved "defer" >> (Defer <$> statement)) <?> "defer"
@@ -291,7 +291,7 @@ funcTypeLiteral :: Parser Type -> Parser Type
 funcTypeLiteral inner = withPosition $ reserved "func" >> (FuncT <$> parens (commaSep typeLiteral) <*> inner)
 
 procTypeLiteral :: Parser Type
-procTypeLiteral = withPosition $ reserved "proc" >> symbol "#" >> (ProcT <$> commaSep innerTypeLiteral <*> option [] (symbol "#" >> commaSep innerTypeLiteral))
+procTypeLiteral = withPosition $ reserved "proc" >> symbol "#" >> noNewline >> (ProcT <$> commaSep innerTypeLiteral <*> option [] (symbol "#" >> option [] (noNewline >> commaSep innerTypeLiteral)))
 
 simpleTypeLiteral :: Parser Type
 simpleTypeLiteral = withPosition . choice $ uncurry (replace reserved) <$> typePairs

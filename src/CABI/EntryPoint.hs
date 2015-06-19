@@ -20,6 +20,7 @@ import LLVM.General.AST (Name(..), Named(..), Instruction(..), Operand(..), Para
 import LLVM.General.AST.Type (Type(FunctionType), void, ptr)
 import LLVM.General.AST.Global (BasicBlock(BasicBlock))
 import LLVM.General.AST.Constant (Constant(Undef, GlobalReference))
+import LLVM.General.AST.Linkage (Linkage(Internal))
 import qualified CABI.X86_64 as X86_64
 import qualified Data.Map as M
 import qualified Data.Traversable as T
@@ -107,6 +108,7 @@ generate f@FuncSpec{ definitionLocation = InLanguage } (mRet, is) = (:[]) $
 generate f@FuncSpec{ definitionLocation = InC } (mRet, is) =
   [ GlobalDefinition $ G.functionDefaults
     { G.name = mangled f
+    , G.linkage = Internal
     , G.callingConvention = CC.Fast
     , G.returnType = case retty f of
                       Just t -> t
@@ -124,8 +126,9 @@ generate f@FuncSpec{ definitionLocation = InC } (mRet, is) =
   ]
   where
     fixedParams = case mRet of
-      Just (Arg Indirect t a _) -> Parameter t (UnName 0) (maybeToList a) : parameters
-      Nothing -> parameters
+      Just (Arg Indirect t a _) -> Parameter t (UnName 0) (maybeToList a) : zipWith makeParam is (UnName <$> [1..])
+      _ -> zipWith makeParam is $ UnName <$> [0..]
+    makeParam (Arg loc t a _) n = Parameter (if loc == Direct then t else ptr t) n (maybeToList a)
     (retT, retAttribs) = case mRet of
       Just (Arg Direct t a _) -> (t, maybeToList a)
       _ -> (void, [])
@@ -134,14 +137,14 @@ generate f@FuncSpec{ definitionLocation = InC } (mRet, is) =
       (params, argOps) <- execWriterT . forM (is `zip` argTs f) $ \(Arg k t a padT, inlangT) -> do
         paramName <- freshName
         let param = Parameter inlangT paramName []
-        execWriterT . T.forM padT $ \padT' ->
-          writer ((), ([],[ConstantOperand $ Undef padT']))
+        T.forM padT $ \padT' ->
+          writer ((), ([],[(ConstantOperand $ Undef padT', [])]))
         allocaOp <- instr (ptr t) $ Alloca t Nothing 0 []
         castPtr <- instr (ptr inlangT) $ BitCast allocaOp (ptr inlangT) []
         uinstr $ Store False castPtr (LocalReference inlangT paramName) Nothing 0 []
         case k of
-          Direct -> (param,) . (, maybeToList a) <$> instr t (Load False allocaOp Nothing 0 [])
-          Indirect -> return (param, (allocaOp, maybeToList a))
+          Direct -> writer . ((),) . ([param],) . (:[]) . (, maybeToList a) =<< instr t (Load False allocaOp Nothing 0 [])
+          Indirect -> writer ((), ([param], [(allocaOp, maybeToList a)]))
 
       -- Call and/or tinker with the return
       let n = nonMangled f

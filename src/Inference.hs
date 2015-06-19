@@ -4,7 +4,7 @@ module Inference (infer) where
 
 import GlobalAst (SourceRange(..), TSize(..), BinOp(..), UnOp(..), location)
 import Inference.Ast hiding (Literal(..))
-import NameResolution.Ast
+import NameResolution.Ast (Resolved(..), ResolvedSource(ResolvedSource))
 import Parser.Ast (HiddenIdentifiers, RequestT(..))
 import Data.Maybe (fromJust, isJust, isNothing, fromMaybe)
 import Data.Functor ((<$>))
@@ -117,6 +117,7 @@ type Super s a = StateT (SuperState s) (ST s) a
 data InferrerState s = InferrerState
                        { _typeDefs :: M.Map String (P.TypeDefT Resolved)
                        , _callableDefs :: M.Map String (P.CallableDefT Resolved)
+                       , _cImports :: M.Map String (Inferred s)
                        , _typeVars :: M.Map String (Inferred s)
                        , _locals :: M.Map Resolved (Inferred s)
                        , _enteredNames :: M.Map P.Type (Inferred s)
@@ -165,7 +166,7 @@ makeLenses ''SuperState
 
 infer :: ResolvedSource -> Either [ErrorMessage] ([IRequest], [IRequest], [CallableDef], M.Map TypeKey FlatType)
 infer (ResolvedSource tDefs cDefs cImps cExps) = runST $ flip evalStateT initSuperState $
-  runInferrer 0 M.empty ((,) <$> mapM convReq cImps <*> mapM convReq cExps) >>= \case
+  runInferrer 0 M.empty M.empty ((,) <$> mapM convReq cImps <*> mapM convReq cExps) >>= \case
     Left e -> return $ Left [e]
     Right ((is, es), st) ->
       runFinalizer initFinalizerState ((,) <$> mapM convReq' is <*> mapM convReq' es)
@@ -173,8 +174,9 @@ infer (ResolvedSource tDefs cDefs cImps cExps) = runST $ flip evalStateT initSup
         Left e -> return $ Left [e]
         Right ((is', es'), finSt) ->
           fmap (\(a, b) -> (is', es', a, b)) <$>
-          inferRequest (_refId st) finSt (fmap (:[]) . mapWith id $ toTup <$> es')
+          inferRequest (_refId st) (makeImpMap is) finSt (fmap (:[]) . mapWith id $ toTup <$> es')
   where
+    makeImpMap rs = M.fromList $ (_1 %~ (\(Global g) -> g)) . toTup <$> rs
     toTup (Request n _ t) = (n, t)
     convReq (Request n n' t) = Request n n' <$> enter t
     convReq' (Request n n' t) = Request n n' <$> convertType fullyReifiedError t
@@ -200,23 +202,24 @@ infer (ResolvedSource tDefs cDefs cImps cExps) = runST $ flip evalStateT initSup
       , _refId = 0
       , _defineTypeVars = False
       , _toInferredMap = M.empty
+      , _cImports = M.empty
       }
-    runInferrer rid infmap = lift . runExceptT . flip runStateT (basicInferrerState {_refId = rid, _toInferredMap = infmap})
+    runInferrer rid infmap imps = lift . runExceptT . flip runStateT (basicInferrerState {_refId = rid, _toInferredMap = infmap, _cImports = imps})
     runFinalizer st = lift . runExceptT . flip runStateT st
-    inferRequest :: Int -> FinalizerState s -> M.Map (Resolved, TypeKey) [(Resolved, TypeKey)] -> Super s (Either [ErrorMessage] ([CallableDef], M.Map TypeKey FlatType))
-    inferRequest _ finSt todo | M.null todo = return $ Right ([], _flatTypes finSt)
-    inferRequest rid finSt todo = (done %= S.insert req) >> case trace ("requested " ++ show req) $ M.lookup fn cDefs of
+    inferRequest :: Int -> M.Map String (Inferred s) -> FinalizerState s -> M.Map (Resolved, TypeKey) [(Resolved, TypeKey)] -> Super s (Either [ErrorMessage] ([CallableDef], M.Map TypeKey FlatType))
+    inferRequest _ _ finSt todo | M.null todo = return $ Right ([], _flatTypes finSt)
+    inferRequest rid imps finSt todo = (done %= S.insert req) >> case trace ("requested " ++ show req) $ M.lookup fn cDefs of
       Nothing -> error $ "Compiler error: could not find callable " ++ fn
-      Just def -> runInferrer rid infmap (enter t >>= enterDef def) >>= \case
-        Left e -> addErr e <$> inferRequest rid finSt rest
+      Just def -> runInferrer rid infmap imps (enter t >>= enterDef def) >>= \case
+        Left e -> addErr e <$> inferRequest rid imps finSt rest
         Right (def', st) -> runFinalizer finSt exiter >>= \case
-          Left e -> addErr e <$> inferRequest rid finSt rest
+          Left e -> addErr e <$> inferRequest rid imps finSt rest
           Right ((def'', reqs), finSt') -> do
             removeDone <- flip S.difference <$> use done
             let next = rest `M.union` ((:path) <$> mapWith id (S.toList nextList))
                 nextList = removeDone $ S.fromList reqs
                 rid' = _refId st
-            fmap (_1 %~ (def'':)) <$> inferRequest rid' finSt' next
+            fmap (_1 %~ (def'':)) <$> inferRequest rid' imps finSt' next
           where
             exiter = (,) <$> exit def' <*> mapM (rightA $ convertType undefined) (_requestedGlobals st)
       where
@@ -388,7 +391,9 @@ instance EnterableWithType (P.ExpressionT Resolved) s (IExpression s) where
       (a, it) <- newICompound locErr t $ IMember prop
       return (CompoundAccess (Variable Self t r) a r, it)
     Global g -> use (callableDefs . at g) >>= \case
-      Nothing -> throwError . ErrorString $ "Compiler error: unknown global " ++ g ++ " at " ++ show r
+      Nothing -> use (cImports . at g) >>= \case
+        Nothing -> throwError . ErrorString $ "Compiler error: unknown global " ++ g ++ " at " ++ show r
+        Just t -> return (Variable n t r, t)
       Just def -> do
         t <- createCallableType def
         requestedGlobals %= ((n,t):)

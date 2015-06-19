@@ -1,0 +1,102 @@
+exportC {
+  main : func () I32
+}
+
+importC {
+  sleep : proc # U32
+
+  tb_init : func () I32 as c_tb_init // the importing is a bit strange here, these should be procs
+  tb_shutdown : proc ##
+
+  tb_width : func () I32 as c_tb_width
+  tb_height : func () I32 as c_tb_height
+
+  tb_clear : proc ##
+  tb_set_clear_attributes : proc # U16, U16
+
+  tb_present : proc ##
+
+  tb_set_cursor : proc # I32, I32
+
+  tb_put_cell : proc # I32, I32, $TBCell
+  tb_change_cell : proc # I32, I32, U32, U16, U16
+
+  tb_peek_event : func ($TBEvent, I32) I32 as c_tb_peek_event
+  tb_poll_event : func ($TBEvent) I32 as c_tb_poll_event
+}
+
+type TBCell {} {
+  character : U32,
+  foreground : U16,
+  background : U16,
+}
+
+type TBEvent {} {
+  event_type : U8,
+  modifier : U8,
+  key : U16,
+  character : U32,
+  width : I32,
+  height : I32,
+  x : I32,
+  y : I32,
+}
+
+// fixing the type of termbox procs {
+// TODO: some of these can be dealt with using some clever importing
+// stuff, some will of course still need manual conversion
+proc ## Bool
+tb_init ## success {
+  if c_tb_init() >= 0 { //TODO: unsafe requirement or something
+    success = true
+  } else {
+    success = false
+  }
+}
+
+proc ## I32
+tb_width ## width {
+  width = c_tb_width()
+}
+
+proc ## I32
+tb_height ## height {
+  height = c_tb_height()
+}
+
+// treats errors the same as no event
+// TODO: the success value could be better served with a sum type
+proc # I32 # TBEvent, Bool
+tb_peek_event # timeout # event, success {
+  let res = c_tb_peek_event(ref(event), timeout)
+  if res > 0 {
+    success = true
+  } else {
+    success = false
+  }
+}
+
+proc ## TBEvent, Bool
+tb_poll_event ## event, success {
+  success = c_tb_poll_event(ref(event)) > 0
+}
+// } fixed the types of the termbox procs
+
+func () ret
+main () ret { // TODO: something is done wrong: reference to undefined UnName 1
+  let mut success = _ // TODO: allow let in output argument to procs
+  tb_init ## success
+  if !success {
+    ret = 1
+    return
+  }
+  defer tb_shutdown ##
+
+  let mut color = 0
+  while color <= 7 {
+    defer color = color + 1
+    tb_change_cell # 3, 3, 32, color, color + 1
+    tb_present ##
+    sleep # 1
+  }
+}
