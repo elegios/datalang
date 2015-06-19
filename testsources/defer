@@ -1,3 +1,7 @@
+exportC {
+  main : func () I32
+}
+
 func () ret
 main () ret {
   ret = 0

@@ -1,14 +1,15 @@
-{-# LANGUAGE FlexibleContexts, TupleSections, FlexibleInstances, MultiParamTypeClasses, LambdaCase #-}
+{-# LANGUAGE FlexibleContexts, TupleSections, FlexibleInstances, MultiParamTypeClasses, LambdaCase, ExistentialQuantification #-}
 
 module Parser (parseFile) where
 
 import Parser.Ast
-import GlobalAst (SourceLoc(..), SourceRange(..), TSize(..), BinOp(..), UnOp(..), TerminatorType(..), Inline(..), location, nowhere)
+import GlobalAst (SourceLoc(..), SourceRange(..), TSize(..), BinOp(..), UnOp(..), TerminatorType(..), Inline(..), location)
 import Data.Functor ((<$>), (<$))
 import Data.Char (isLower, isUpper)
 import Data.Either (partitionEithers)
 import Control.Applicative ((<*>), (<*))
 import Control.Monad.Identity
+import Control.Lens ((.~), _1, _2)
 import Text.Parsec hiding (runParser, newline)
 import Text.Parsec.Expr
 import qualified Data.Text.Lazy as L
@@ -53,7 +54,41 @@ parseFile path = runParser sourceParser initState path <$> LIO.readFile path
     initState = ParseState (error "Compiler error: haven't parsed anything, thus cannot find the end position of a thing") True
 
 sourceParser :: Parser SourceFile
-sourceParser = whiteSpace >> SourceFile <$> many typeDef <*> many callableDef <*> return [] <*> return [Request "main" "main" $ FuncT [] (IntT S32 nowhere) nowhere] <* eof -- TODO: actual c imports and exports
+sourceParser = whiteSpace >> do
+  (imps, exps) <- permutation ([], [])
+                  [ PermutePair cImports (_1 .~)
+                  , PermutePair cExports (_2 .~)]
+  SourceFile <$> many typeDef <*> many callableDef <*> return imps <*> return exps <* eof
+
+
+data PermutePair s = forall a. PermutePair (Parser a) (a -> s -> s)
+
+permutation :: s -> [PermutePair s] -> Parser s
+permutation s [] = return s
+permutation s ps = recurse ps >>= \case
+  (Just update, rest) -> permutation (update s) rest
+  (Nothing, _) -> return s
+  where
+    recurse [] = return (Nothing, [])
+    recurse (pa@(PermutePair p f):rest) = ((,rest) . Just . f <$> p) <|> (fmap (pa:) <$> recurse rest)
+
+cImports :: Parser [Request]
+cImports = reserved "importC" >> braces (imp `sepEndBy1` separator)
+  where
+    imp = do
+      name <- identifier
+      t <- symbol ":" >> (procTypeLiteral <|> funcTypeLiteral typeLiteral)
+      internalName <- option name $ reserved "as" >> identifier
+      return $ Request internalName name t
+
+cExports :: Parser [Request]
+cExports = reserved "exportC" >> braces (export `sepEndBy1` separator)
+  where
+    export = do
+      internalName <- identifier
+      t <- symbol ":" >> (procTypeLiteral <|> funcTypeLiteral typeLiteral)
+      name <- option internalName $ reserved "as" >> identifier
+      return $ Request internalName name t
 
 callableDef :: Parser CallableDef
 callableDef = withPosition $ procDef <|> funcDef

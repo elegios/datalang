@@ -1,3 +1,7 @@
+exportC {
+  main : func () I32
+}
+
 type Array<i, t> {
   [i] 0 <= i && i < len
   -> ptr[i]

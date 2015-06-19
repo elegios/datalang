@@ -1,3 +1,7 @@
+exportC {
+  main : func () I32
+}
+
 alias Tuple<a, b> { a : a, b : b }
 type Tuple2<a, b> {} { a : a, b : b }
 alias Tuple3<a> { a : a, b : a }

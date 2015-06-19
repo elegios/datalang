@@ -1,3 +1,7 @@
+exportC {
+  main : func () I32
+}
+
 type Vector3<i> {} {x : i, y : i, z : i}
 
 func (Vector3<i>, Vector3<i>) i

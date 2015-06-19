@@ -13,7 +13,7 @@ data SourceFileT v = SourceFile
   , cExportDefinitions :: [RequestT Type v]
   }
 
-type Request = RequestT String Type
+type Request = RequestT Type String
 data RequestT t v = Request v String t deriving (Eq, Ord)
 
 data HiddenIdentifiers = HideAll | HideSome [String] deriving Show
