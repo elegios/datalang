@@ -1,20 +1,17 @@
 type Vector3<i> {} {x : i, y : i, z : i}
 
-func dot
-Vector3<i>, Vector3<i> -> i
-a, b -> c {
+func (Vector3<i>, Vector3<i>) i
+dot (a, b) c {
   c = a.x*b.x + a.y*b.y + a.z*b.z
 }
 
-proc dotProc
-Vector3<i>, Vector3<i> -> i
-a, b -> c {
+proc # Vector3<i>, Vector3<i> # i
+dotProc # a, b # c {
   c = a.x*b.x + a.y*b.y + a.z*b.z
 }
 
-func main
--> ret
--> ret {
+func () ret
+main () ret {
   let a = {1, 0, 0} to Vector3
   let b = {0, 1, 0} to Vector3
   ret = inline dot(a, b)

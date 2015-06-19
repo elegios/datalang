@@ -1,6 +1,5 @@
-func main
--> rType
--> ret {
+func () ret
+main () ret {
   ret = 0
   let mut extra = 0
   defer ret = ret - 1

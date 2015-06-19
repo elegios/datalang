@@ -24,18 +24,16 @@ type Matrix<t> {
   columns : U32,
 }
 
-func main
--> r
--> r {
+func () r
+main () r {
   let a : Matrix<r>
   let b : Matrix<r>
   let mut c : Matrix<r>
   multiply # a, b # c
 }
 
-proc multiply
-Matrix<t>, Matrix<t> -> Matrix<t>
-a, b -> c {
+proc # Matrix<t>, Matrix<t> # Matrix<t>
+multiply # a, b # c {
   let numCells = a.rows * b.columns
   if c.content.cap <= numCells {
     realloc # numCells # c.content.ptr
@@ -62,8 +60,7 @@ a, b -> c {
   }
 }
 
-proc realloc
-i -> $t
-num -> ptr {
+proc # i # $t
+realloc # num # ptr {
   // TODO: interface with the real realloc
 }

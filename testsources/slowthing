@@ -1,6 +1,5 @@
-func main
--> ret
--> ret {
+func () ret
+main () ret {
   ret = 0
   let mut a : I64 = 4
   let mut bo = true

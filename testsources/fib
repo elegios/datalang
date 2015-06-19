@@ -1,6 +1,5 @@
-func fib
-t -> t
-n -> b {
+func (t) t
+fib (n) b {
   b = 1
   let mut a = 1
   let mut index = n - 2
@@ -12,9 +11,8 @@ n -> b {
   }
 }
 
-func fibSlow
-t -> t
-n -> b {
+func (t) t
+fibSlow (n) b {
   let temp : t = fib(45)
   if n <= 2 {
     b = 1
@@ -23,9 +21,8 @@ n -> b {
   b = fibSlow(n-1) + fibSlow(n-2)
 }
 
-func main
--> rType
--> ret {
+func () ret
+main () ret {
   let blub : I64 = fib(45)
   ret = fibSlow(45)
 }

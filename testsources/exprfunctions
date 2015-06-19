@@ -1,6 +1,5 @@
-func main
--> a
--> a {
+func () a
+main () a {
   a = 0
   a = ofunc(a)
   if true {
@@ -14,14 +13,12 @@ func main
   // supposed returnvalue: 4
 }
 
-proc other
-a -> a
-a -> b {
+proc # a # a
+other # a # b {
   b = a + 2
 }
 
-func ofunc
-a -> a
-a -> b {
+func (a) a
+ofunc (a) b {
   b = a + 2
 }

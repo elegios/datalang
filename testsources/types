@@ -30,9 +30,8 @@ type RenameThing {
   c -> a
 } { a : Bool, b : Bool}
 
-func main
--> ret
--> ret {
+func () ret
+main () ret {
   {
     let mut tup : Tuple
     {

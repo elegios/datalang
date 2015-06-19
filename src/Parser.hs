@@ -56,16 +56,24 @@ sourceParser :: Parser SourceFile
 sourceParser = whiteSpace >> SourceFile <$> many typeDef <*> many callableDef <*> return [] <*> return [Request "main" "main" $ FuncT [] (IntT S32 nowhere) nowhere] <* eof -- TODO: actual c imports and exports
 
 callableDef :: Parser CallableDef
-callableDef = withPosition $
-  (reserved "proc" >> makedef ProcDef commaSep commaSep) <|>
-  (reserved "func" >> makedef FuncDef id id)
+callableDef = withPosition $ procDef <|> funcDef
   where
-    makedef c m1 m2 = c <$> identifier
-                  <*> commaSep typeLiteral <* symbol "->"
-                  <*> m1 typeLiteral
-                  <*> commaSep identifier <* symbol "->"
-                  <*> m2 identifier
-                  <*> scope
+    procDef = do
+      ProcT iTs oTs _ <- procTypeLiteral
+      name <- newline >> identifier
+      is <- symbol "#" >> commaSep identifier
+      os <- option [] $ symbol "#" >> commaSep identifier
+      if length iTs /= length is || length oTs /= length os
+        then fail $ "Wrong number of arguments for proc " ++ name ++ ", expected # " ++ show (length iTs) ++ " # " ++ show (length oTs) ++ ", got # " ++ show (length is) ++ " # " ++ show (length os)
+        else ProcDef name iTs oTs is os <$> scope
+    funcDef = do
+      FuncT iTs retT _ <- funcTypeLiteral typeLiteral
+      name <- newline >> identifier
+      is <- parens $ commaSep identifier
+      ret <- identifier
+      if length is /= length is
+        then fail $ "Wrong number of arguments for func " ++ name ++ ", expected " ++ show (length iTs) ++ ", got " ++ show (length is)
+        else FuncDef name iTs retT is ret <$> scope
 
 statement :: Parser Statement
 statement = procCall
@@ -232,8 +240,23 @@ typeDef = withPosition $ newType <|> alias
 typeLiteral :: Parser Type -- TODO: parse func and proc type literals
 typeLiteral = simpleTypeLiteral
           <|> namedTypeLiteral
-          <|> pointerTypeLiteral
+          <|> pointerTypeLiteral typeLiteral
+          <|> funcTypeLiteral typeLiteral
+          <|> procTypeLiteral
           <|> structTypeLiteral
+
+innerTypeLiteral :: Parser Type
+innerTypeLiteral = simpleTypeLiteral
+               <|> namedTypeLiteral
+               <|> pointerTypeLiteral innerTypeLiteral
+               <|> funcTypeLiteral innerTypeLiteral
+               <|> structTypeLiteral
+
+funcTypeLiteral :: Parser Type -> Parser Type
+funcTypeLiteral inner = withPosition $ reserved "func" >> (FuncT <$> parens (commaSep typeLiteral) <*> inner)
+
+procTypeLiteral :: Parser Type
+procTypeLiteral = withPosition $ reserved "proc" >> symbol "#" >> (ProcT <$> commaSep innerTypeLiteral <*> option [] (symbol "#" >> commaSep innerTypeLiteral))
 
 simpleTypeLiteral :: Parser Type
 simpleTypeLiteral = withPosition . choice $ uncurry (replace reserved) <$> typePairs
@@ -262,8 +285,8 @@ namedTypeLiteral = withPosition $ try typeVar <|> (NamedT <$> identifier <*> tPa
       n@(c:_) <- identifier
       if isLower c then return $ TypeVar n else fail ""
 
-pointerTypeLiteral :: Parser Type
-pointerTypeLiteral = withPosition $ symbol "$" >> PointerT <$> typeLiteral
+pointerTypeLiteral :: Parser Type -> Parser Type
+pointerTypeLiteral inner = withPosition $ symbol "$" >> PointerT <$> inner
 
 structTypeLiteral :: Parser Type
 structTypeLiteral = withPosition . braces $ StructT <$> commaSepEnd property

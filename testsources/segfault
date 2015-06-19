@@ -1,6 +1,5 @@
-func main
--> ret
--> ret {
+func () ret
+main () ret {
   let mut p : $I32
   p = null
   $p = 7 : I32

@@ -26,9 +26,8 @@ type Slice<i, t> {
   -> ptr[i]
 } { ptr : $t, len : i }
 
-func main
--> ret
--> ret {
+func () ret
+main () ret {
   let mut collection : Array
   malloc # 42 : I32 # collection
   let mut it = collection.firstIter
@@ -43,8 +42,7 @@ func main
   */
 }
 
-proc malloc
-n -> Array<n,t>
-n -> ary {
+proc # n # Array<n, t>
+malloc # n # ary {
   // TODO: actual implementation
 }
