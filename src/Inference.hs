@@ -331,14 +331,12 @@ instance Enterable (P.StatementT Resolved) s (IStatement s) where
       Just (e, et) -> T.mapM (enter >=> unify errF et) mt >> return (e, et)
       Nothing -> do
         u <- newUnbound noRestriction
-        t' <- justErr internal mt >>= enter
+        t' <- T.mapM enter mt >>= maybe (newUnbound noRestriction) return
         unify errF u t'
         return (ExprLit $ Zero u r, t')
     locals . at n ?= t'
     return $ VarInit mut n e' r
-    where
-      errF m = ErrorString $ "Type mismatch in let at " ++ show r ++ ": " ++ m
-      internal = ErrorString $ "Compiler error: neither type nor expr at " ++ show r
+    where errF m = ErrorString $ "Type mismatch in let at " ++ show r ++ ": " ++ m
 
 instance Enterable (P.ExpressionT Resolved) s (IExpression s) where
   enter = fmap fst . enterT
