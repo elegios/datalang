@@ -410,7 +410,7 @@ instance GenerateableWithOperand Literal where
 
 shortcutting :: TypeKey -> BinOp -> AST.Operand -> Expression -> CodeGen Operand
 shortcutting t op e1op e2 = do
-  prevName <- use (currentBlock . blockName)
+  prevName <- use $ currentBlock . blockName
   (contName, nextName) <- (,) <$> newName <*> newName
   let (tNext, fNext) = case op of
         ShortAnd -> (contName, nextName)
@@ -420,9 +420,10 @@ shortcutting t op e1op e2 = do
 
   finalizeAndReplaceWith $ BasicBlock contName [] (Do $ Br nextName [])
   Operand _ _ e2op <- genO e2 >>= unPoint
+  finalContName <- use $ currentBlock . blockName
 
   finalizeAndReplaceWith $ BasicBlock nextName [] prevTerminator
-  instr t False $ Phi T.i1 [(e1op, prevName), (e2op, contName)] []
+  instr t False $ Phi T.i1 [(e1op, prevName), (e2op, finalContName)] []
 
 simpleBinOps :: TypeKey -> BinOp -> AST.Operand -> AST.Operand -> CodeGen Operand
 simpleBinOps t op op1 op2 = do

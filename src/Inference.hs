@@ -536,7 +536,7 @@ unify errF t1 t2 = unless (t1 == t2) $ case (t1, t2) of
   (IFunc i1 o1, IFunc i2 o2) | length i1 == length i2 -> do
     zipWithM_ uni i1 i2
     uni o1 o2
-  _ -> throwError . errF $ "Incompatible types (" ++ show t1 ++ " != " ++ show t2 ++ ")"
+  _ -> throwError . errF $ "Incompatible types (" ++ show t1 ++ " != " ++ show t2 ++ ")" -- TODO: better reporting for incorrect number of arguments
   where
     uni = unify errF
     linkCompression :: TVarRef s -> TVar s -> Inferrer s (TVarRef s)

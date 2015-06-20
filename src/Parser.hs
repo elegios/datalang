@@ -35,7 +35,7 @@ langDef = T.LanguageDef
   , T.identLetter = alphaNum <|> char '_'
   , T.opStart = T.opLetter langDef
   , T.opLetter = oneOf "+-*/%<>=!^&|:,"
-  , T.reservedNames = ["defer", "if", "else", "while", "return", "break", "continue", "null", "let", "mut", "func", "proc", "self", "ref", "to", "inline", "noinline"]
+  , T.reservedNames = ["defer", "if", "else", "while", "return", "break", "continue", "null", "let", "mut", "func", "proc", "ref", "to", "inline", "noinline"]
   , T.reservedOpNames =
     [ "-", "^", "&", "!", "*"
     , "/", "%", "+", "-", "<<"

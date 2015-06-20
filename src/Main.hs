@@ -66,6 +66,7 @@ testLLVMstuff = do
 writeModuleToObjectFile :: AST.Module -> FilePath -> IO ()
 writeModuleToObjectFile m p = asGeneralModule m $ \mod ->
   -- printModule mod >>
+  -- failIO (M.writeLLVMAssemblyToFile (M.File $ p ++ ".ll") mod) >>
   runExceptT (verify mod) >>= \case
     Left mess -> putStrLn $ "Verify error: " ++ mess
     Right _ -> do
