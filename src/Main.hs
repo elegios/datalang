@@ -38,7 +38,17 @@ import qualified Data.Map as Map
 -- TODO: Delete/Heap/Stack?
 
 -- TODO: Bitcast, conversion.
--- TODO: Allow calling of functionpointers
+
+{- Extracted from testproject:
+ - TODO: sum types (one place or so, but other applications need it more)
+ - TODO: casting/converting (makes some things that should be simple impossible)
+ - TODO: += and/or ++ (the former can be a form of rewriting)
+ - TODO: constants
+ - TODO: switch/match
+ - TODO: selecting values based on match or boolean in expression
+ - TODO: foreach (rewriting, question is if it's a general macro or a builtin)
+ - TODO: allocation stuff (need a bunch of thinking on this one)
+-}
 
 -- main :: IO ()
 main = do
