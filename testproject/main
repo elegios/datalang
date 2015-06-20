@@ -4,6 +4,8 @@ exportC {
 
 importC {
   sleep : proc # U32
+  arc4random_uniform : func (I32) I32 // TODO: should be U32, but lack of casting necessitates this
+  malloc : func (U64) $MineCell as c_malloc // TODO: once again strange with casting
 
   tb_init : func () I32 as c_tb_init // the importing is a bit strange here, these should be procs
   tb_shutdown : proc ##
@@ -41,6 +43,45 @@ type TBEvent {} {
   x : I32,
   y : I32,
 }
+
+alias MineCell {
+  revealed : Bool,
+  mine : Bool,
+  marked : Bool,
+}
+
+type MineGrid {
+  [x, y] | 0 <= x && x < width && 0 <= y && y < height
+  -> ptr[x + width*y]
+
+  ['iter] -> 0
+  ['fromIter i] -> ptr[i]
+  ['isIter i] -> i < width*height
+  ['next i] -> i+1
+
+  ['countAround x, y] | 0 <= x && x < width && 0 <= y && y < height
+  -> inline countGrid(self to MineGrid, x, y)
+
+  ['inside x, y] -> 0 <= x && x < width && 0 <= y && y < height
+} {
+  ptr : $MineCell,
+  width : I32,
+  height : I32,
+  mineCount : I32,
+}
+
+// fixing c procs {
+proc # I32 # I32
+rand # upper # res {
+  res = arc4random_uniform(upper)
+}
+
+proc # count # $MineCell, Bool
+malloc # count # ptr, success {
+  ptr = c_malloc(count * 3) // TODO: sizeof, better allocation, alloca
+  success = ptr != null
+}
+//}
 
 // fixing the type of termbox procs {
 // TODO: some of these can be dealt with using some clever importing
@@ -82,21 +123,233 @@ tb_poll_event ## event, success {
 }
 // } fixed the types of the termbox procs
 
-func () ret
-main () ret { // TODO: something is done wrong: reference to undefined UnName 1
-  let mut success = _ // TODO: allow let in output argument to procs
+func () exitCode
+main () exitCode {
+  let mut score : I32
+  play ## score, exitCode
+}
+
+proc ## score, exitCode
+play ## score, exitCode {
+  score = 0
+  let mut success
   tb_init ## success
   if !success {
-    ret = 1
+    exitCode = 1
     return
   }
   defer tb_shutdown ##
 
-  let mut color = 0
-  while color <= 7 {
-    defer color = color + 1
-    tb_change_cell # 3, 3, 32, color, color + 1
+  let mut grid = {width = 25, height = 25} to MineGrid
+  // malloc # grid.width * grid.height # grid.ptr, success // TODO: casting to U64 in malloc proc
+  malloc # 25 * 25 : U64 # grid.ptr, success
+  if !success {
+    exitCode = 2
+    return
+  }
+
+  let mut iter = grid['iter]
+  while grid['isIter iter] {
+    defer iter = grid['next iter]
+
+    let mut r // TODO: let in proc res
+    rand # 7 # r
+    grid['fromIter iter] = {mine = r == 0} // TODO: could just calloc and only change mines
+    if grid['fromIter iter].mine {
+      grid.mineCount = grid.mineCount + 1 // TODO: += and/or ++
+    }
+  }
+
+  loop ## grid, score, exitCode
+}
+
+proc ## MineGrid, score, exitCode
+loop ## grid, score, exitCode {
+  let mut success
+  let mut cur_x = 0
+  let mut cur_y = 0
+
+
+  while true {
+    {
+      let mut x = 0
+      while x < grid.width {
+        defer x = x + 1
+        let mut y = 0
+        while y < grid.height {
+          defer y = y + 1
+  	drawAt # x, y, grid, false
+        }
+      }
+    }
+    drawAt # cur_x, cur_y, grid, true
     tb_present ##
-    sleep # 1
+
+    let mut event
+    tb_poll_event ## event, success
+    if !success {
+      exitCode = 3
+      return
+    }
+    let mut xdiff = 0
+    let mut ydiff = 0
+    let mut doReveal = false
+    let mut doMark = false
+
+    if event.event_type == 1 {
+      // NOTE: key event
+      if event.key == 0xFFFF-18 { // NOTE: arrow up // TODO: constants
+        ydiff = -1
+      } else if event.key == 0xFFFF-19 { // NOTE: arrow down // TODO: switch/match
+        ydiff = 1
+      } else if event.key == 0xFFFF-20 { // NOTE: arrow left // TODO: switch/match
+        xdiff = -1
+      } else if event.key == 0xFFFF-21 { // NOTE: arrow right // TODO: switch/match
+        xdiff = 1
+      } else if event.key == 0x0D || event.key == 0x20 { // NOTE: enter or space
+        doReveal = true
+      } else if event.character == 97 { // NOTE: a
+      	doMark = true
+      } else if event.key == 0x1B { // NOTE: escape
+        success = true
+	return
+      }
+    } else {
+      // NOTE: don't handle these kinds of events
+    }
+
+    {
+      let cell = grid[cur_x, cur_y]
+      if doReveal && !cell.marked && !cell.revealed {
+	expandAround # cur_x, cur_y # grid
+        if cell.mine {
+          success = true
+          drawAt # cur_x, cur_y, grid, false
+          tb_present ##
+          sleep # 2
+          return
+
+        } else {
+          score = score + 1
+        }
+      }
+      if doMark && !cell.revealed {
+        grid[cur_x, cur_y].marked = !grid[cur_x, cur_y].marked
+      }
+    }
+
+    drawAt # cur_x, cur_y, grid, false
+    cur_x = min(max(0, cur_x + xdiff), grid.width-1)
+    cur_y = min(max(0, cur_y + ydiff), grid.height-1)
+    drawAt # cur_x, cur_y, grid, true
+
+    tb_present ##
+  }
+}
+
+proc # coord, coord, MineGrid, Bool
+drawAt # x, y, grid, cursor {
+  let cell = grid[x, y]
+  let mut back = 1 // TODO: some sort of expression if/case/switch
+  if cell.revealed {
+    back = 0
+  }
+  if cursor {
+    back = 5
+  }
+
+  if cell.revealed {
+     if cell.mine {
+       tb_change_cell # x, y, 42, 1, 2
+     } else {
+       let remaining = satisfied(grid, x, y)
+       let mut fore = 1
+       if remaining < 0 {
+         fore = 2
+       } else if remaining > 0 {
+         fore = 3
+       }
+       tb_change_cell # x, y, 48 + grid['countAround x, y], fore, back
+     }
+  } else {
+    if cell.marked {
+      tb_change_cell # x, y, 70, 2, back
+    } else {
+      tb_change_cell # x, y, 32, 1, back
+    }
+  }
+}
+
+func (a, a) a
+min (a, b) c {
+  if a < b {
+    c = a
+  } else {
+    c = b
+  }
+}
+func (a, a) a
+max (a, b) c {
+  if a > b {
+    c = a
+  } else {
+    c = b
+  }
+}
+
+func (MineGrid, coord, coord) count
+countGrid (grid, x, y) count {
+  let mut currX = x - 1 // TODO: better looping would be very, very nice
+  while currX <= x + 1 {
+    defer currX = currX + 1
+    let mut currY = y - 1
+    while currY <= y + 1 {
+      defer currY = currY + 1
+      if (currX == x && currY == y) || !grid['inside currX, currY] {
+        continue
+      }
+      if grid[currX, currY].mine {
+        count = count + 1
+      }
+    }
+  }
+}
+
+proc # I32, I32 # MineGrid
+expandAround # x, y # grid {
+  if !grid['inside x, y] || grid[x, y].revealed {
+    return
+  }
+
+  grid[x, y].revealed = true
+
+  if grid['countAround x, y] : U8 != 0 {
+    return
+  }
+  let mut currX = x - 1
+  while currX <= x + 1 {
+    defer currX = currX + 1
+    let mut currY = y - 1
+    while currY <= y + 1 {
+      defer currY = currY + 1
+      expandAround # currX, currY # grid
+    }
+  }
+}
+
+
+func (MineGrid, coord, coord) I32
+satisfied (grid, x, y) remaining {
+  remaining = grid['countAround x, y]
+  let mut currX = x - 1
+  while currX <= x + 1 {
+    defer currX = currX + 1
+    let mut currY = y - 1
+    while currY <= y + 1 {
+      defer currY = currY + 1
+      if grid['inside currX, currY] && grid[currX, currY].marked {
+        remaining = remaining - 1
+      }
+    }
   }
 }
