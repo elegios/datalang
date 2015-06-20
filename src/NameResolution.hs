@@ -100,7 +100,10 @@ instance Resolvable StatementT where
   resolve (If c ts mes r) =
     If <$> resolve c <*> resolve ts <*> T.mapM resolve mes <*> return r
   resolve (ProcCall inl c i o r) =
-    ProcCall inl <$> resolve c <*> mapM resolve i <*> mapM resolve o <*> return r
+    ProcCall inl <$> resolve c <*> mapM resolve i <*> mapM eitherResolve o <*> return r
+    where
+      eitherResolve (Left a) = Left <$> resolve a
+      eitherResolve (Right a) = Right <$> resolve a
   resolve (Scope s r) = do
     prevState <- get
     currentDepth += 1

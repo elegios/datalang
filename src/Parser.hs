@@ -129,7 +129,8 @@ procCall = withPosition ((spec <|> unspec) <*> is <*> os) <?> "proc call"
            <*> expression <* char '#'
     unspec = try (ProcCall UnspecifiedInline <$> expression <* char '#')
     is = whiteSpace >> option [] (noNewline >> commaSep expression)
-    os = option [] $ symbol "#" >> option [] (noNewline >> commaSep expression)
+    os = option [] $ symbol "#" >> option [] (noNewline >> commaSep out)
+    out = fmap Left varInit <|> fmap Right expression
 
 defer :: Parser Statement
 defer = withPosition (reserved "defer" >> (Defer <$> statement)) <?> "defer"

@@ -92,7 +92,7 @@ instance Biplate [Type] Type where
   biplate (t:ts) = plate (:) |* t ||* ts
 
 type Statement = StatementT String
-data StatementT v = ProcCall Inline (ExpressionT v) [ExpressionT v] [ExpressionT v] SourceRange
+data StatementT v = ProcCall Inline (ExpressionT v) [ExpressionT v] [Either (StatementT v) (ExpressionT v)] SourceRange
                   | Defer (StatementT v) SourceRange
                   | ShallowCopy (ExpressionT v) (ExpressionT v) SourceRange
                   | If (ExpressionT v) (StatementT v) (Maybe (StatementT v)) SourceRange

@@ -88,7 +88,7 @@ malloc # count # ptr, success {
 // stuff, some will of course still need manual conversion
 proc ## Bool
 tb_init ## success {
-  if c_tb_init() >= 0 { //TODO: unsafe requirement or something
+  if c_tb_init() >= 0 { // TODO: unsafe requirement or something
     success = true
   } else {
     success = false
@@ -125,15 +125,13 @@ tb_poll_event ## event, success {
 
 func () exitCode
 main () exitCode {
-  let mut score : I32
-  play ## score, exitCode
+  play ## let score : I32, exitCode
 }
 
 proc ## score, exitCode
 play ## score, exitCode {
   score = 0
-  let mut success
-  tb_init ## success
+  tb_init ## let mut success
   if !success {
     exitCode = 1
     return
@@ -152,8 +150,7 @@ play ## score, exitCode {
   while grid['isIter iter] {
     defer iter = grid['next iter]
 
-    let mut r // TODO: let in proc res
-    rand # 7 # r
+    rand # 7 # let r
     grid['fromIter iter] = {mine = r == 0} // TODO: could just calloc and only change mines
     if grid['fromIter iter].mine {
       grid.mineCount = grid.mineCount + 1 // TODO: += and/or ++
@@ -168,7 +165,6 @@ loop ## grid, score, exitCode {
   let mut success
   let mut cur_x = 0
   let mut cur_y = 0
-
 
   while true {
     {
@@ -185,8 +181,7 @@ loop ## grid, score, exitCode {
     drawAt # cur_x, cur_y, grid, true
     tb_present ##
 
-    let mut event
-    tb_poll_event ## event, success
+    tb_poll_event ## let event, success
     if !success {
       exitCode = 3
       return

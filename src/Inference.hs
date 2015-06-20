@@ -301,7 +301,11 @@ instance Enterable (P.StatementT Resolved) s (IStatement s) where
   enter (P.ProcCall inl p is os r) = do
     (p', t) <- enterT p
     (is', its) <- unzip <$> mapM enterT is
-    (os', ots) <- unzip <$> mapM enterT os
+    (os', ots) <- fmap unzip . forM os $ \case
+      Right e -> (_1 %~ Right) <$> enterT e
+      Left s@P.VarInit{} -> do
+        s'@(VarInit _ n _ _) <- enter s
+        (Left s',) . fromJust <$> use (locals . at n)
     unify errF t $ IProc its ots
     return $ ProcCall inl p' is' os' r
     where errF m = ErrorString $ show r ++ ": " ++ m
@@ -752,7 +756,9 @@ instance Finalizable (ICallableDef s) s CallableDef where
 
 instance Finalizable (IStatement s) s Statement where
   exit (ProcCall inl p is os r) =
-    ProcCall inl <$> exit p <*> mapM exit is <*> mapM exit os <*> return r
+    ProcCall inl <$> exit p <*> mapM exit is <*> mapM exitEither os <*> return r
+    where exitEither (Left a) = Left <$> exit a
+          exitEither (Right a) = Right <$> exit a
   exit (Defer s r) = Defer <$> exit s <*> return r
   exit (ShallowCopy a e r) = ShallowCopy <$> exit a <*> exit e <*> return r
   exit (If c t me r) = If <$> exit c <*> exit t <*> T.mapM exit me <*> return r

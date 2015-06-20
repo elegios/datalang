@@ -11,6 +11,7 @@ import Control.Applicative ((<*>), Applicative)
 import Control.Lens hiding (op, index)
 import Control.Monad.State
 import Control.Monad.Except (ExceptT, runExceptT, MonadError, throwError)
+import Control.Monad.Writer (writer, runWriterT)
 import Data.Either (partitionEithers)
 import Data.Maybe (fromMaybe, fromJust)
 import Data.Functor ((<$>))
@@ -223,16 +224,11 @@ codegenBody d = do
 -- ###Regular code generation
 
 instance Generateable Statement where
-  gen (ProcCall inl (Variable n@Global{} pt _) is os _) = do
-    pop <- requestCallable (n, pt, inl)
-    iOps <- mapM (genO >=> unPoint) is
-    oOps <- mapM genO os
-    uinstr $ Call False CC.Fast [] pop ((,[]) . getOp <$> (iOps ++ oOps)) [] []
+  gen (ProcCall inl (Variable n@Global{} pt _) is os _) =
+    requestCallable (n, pt, inl) >>= callProc is os
   gen (ProcCall _ e is os _) = do -- TODO: check if this is correct and actually works
-    Operand _ False pop <- genO e >>= unPoint
-    iOps <- mapM (genO >=> unPoint) is
-    oOps <- mapM genO os
-    uinstr $ Call False CC.Fast [] (Right pop) ((,[]) . getOp <$> (iOps ++ oOps)) [] []
+    Operand _ False pOp <- genO e >>= unPoint
+    callProc is os $ Right pOp
   gen (Defer stmnt _) = do
     defers . defersAll %= (stmnt :)
     defers . defersLoop %= (stmnt :)
@@ -294,13 +290,9 @@ instance Generateable Statement where
   gen (VarInit False n e _) = genO e >>= unPoint >>= (locals . at n ?=)
   gen (VarInit True n e _) = do
     Operand t False eOp <- genO e >>= unPoint
-    allocaName <- newName
-    allocaType <- toLLVMType False t
-    let varOp = AST.LocalReference (T.ptr allocaType) allocaName
-        alloca = Alloca allocaType Nothing 0 []
-    entryBlock . blockInstrs %= (allocaName := alloca :)
-    locals . at n ?= Operand t True varOp
-    uinstr $ Store False varOp eOp Nothing 0 []
+    o@(Operand _ _ allocaOp) <- entryAlloca t
+    locals . at n ?= o
+    uinstr $ Store False allocaOp eOp Nothing 0 []
 
 instance GenerateableWithOperand Expression where
   genO (Bin op e1 e2 _) = do
@@ -471,6 +463,37 @@ simpleBinOps t op op1 op2 = do
 
 
 -- ###Codegen helpers
+
+entryAlloca :: TypeKey -> CodeGen Operand
+entryAlloca t = do
+  allocaName <- newName
+  allocaType <- toLLVMType False t
+  let allocaOp = AST.LocalReference (T.ptr allocaType) allocaName
+      alloca = Alloca allocaType Nothing 0 []
+  entryBlock . blockInstrs %= (allocaName := alloca :)
+  return $ Operand t True allocaOp
+
+callProc :: [Expression] -> [Either Statement Expression] -> AST.CallableOperand -> CodeGen ()
+callProc is os pOp = do
+  iOps <- mapM (genO >=> unPoint) is
+  (oOps, letDefs) <- runWriterT . forM os $ \case
+    Right (ExprLit (Undef t r)) -> do
+      o@(Operand _ _ allocaOp) <- lift $ entryAlloca t
+      Operand _ _ zeroOp <- lift . genO $ Zero t r
+      lift . uinstr $ Store False allocaOp zeroOp Nothing 0 []
+      return o
+    Right o -> lift $ genO o
+    Left v@(VarInit True n _ _) -> lift $ gen v >> (fromJust <$> use (locals . at n))
+    Left (VarInit False n e _) -> do
+      Operand t _ eOp <- lift $ genO e >>= unPoint
+      o@(Operand _ _ allocaOp) <- lift $ entryAlloca t
+      writer ((), [(n, t, allocaOp)])
+      lift . uinstr $ Store False allocaOp eOp Nothing 0 []
+      return o
+  uinstr $ Call False CC.Fast [] pOp ((,[]) . getOp <$> (iOps ++ oOps)) [] []
+  forM_ letDefs $ \(n, t, allocaOp) ->
+    instr t False (Load False allocaOp Nothing 0 []) >>= (locals . at n ?=)
+
 
 true :: Operand
 true = Operand bool False . AST.ConstantOperand $ C.Int 1 1

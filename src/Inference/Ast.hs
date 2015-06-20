@@ -27,7 +27,7 @@ data CallableDefT t a l = FuncDef
                         }
 
 type Statement = StatementT TypeKey CompoundAccess Literal
-data StatementT t a l = ProcCall Inline (ExpressionT t a l) [ExpressionT t a l] [ExpressionT t a l] SourceRange
+data StatementT t a l = ProcCall Inline (ExpressionT t a l) [ExpressionT t a l] [Either (StatementT t a l) (ExpressionT t a l)] SourceRange
                       | Defer (StatementT t a l) SourceRange
                       | ShallowCopy (ExpressionT t a l) (ExpressionT t a l) SourceRange
                       | If (ExpressionT t a l) (StatementT t a l) (Maybe (StatementT t a l)) SourceRange
