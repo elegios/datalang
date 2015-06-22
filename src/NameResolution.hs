@@ -18,8 +18,7 @@ import qualified Data.Set as S
 import qualified Data.Traversable as T
 
 data ResolverState = ResolverState
-  { _currentDepth :: Int
-  , _scope :: M.Map String Resolved
+  { _scope :: M.Map String Resolved
   }
 
 data ErrorMessage = ErrorString String deriving Show
@@ -41,7 +40,7 @@ resolveNames (SourceFile tDefs cDefs cImps cExps) = eResolvedFile
       es -> Left es
     names = (callableName <$> cDefs) ++ (inLangName <$> cImps)
     inLangName (Request n _ _) = n
-    initState = ResolverState 0 $ M.fromList . zip names $ Global <$> names
+    initState = ResolverState $ M.fromList . zip names $ Global <$> names
     mergeApply (Left e1) (Left e2) = Left $ e1 ++ e2
     mergeApply (Left e) _ = Left e
     mergeApply _ (Left e) = Left e
@@ -60,9 +59,9 @@ mapWith :: Ord k => (a -> k) -> [a] -> M.Map k a
 mapWith f es = M.fromList $ zip (map f es) es
 
 define :: SourceRange -> String -> Resolved -> Resolver ()
-define sr n r@(Local d _) =
+define sr n r@(Local _) =
   (scope . at n <<.= Just r) >>= \case
-    Just (Local d' _) | d == d' -> throwError . ErrorString $ "Redefinition of " ++ n ++ " at " ++ show sr
+    Just (Local _) -> throwError . ErrorString $ "Redefinition of " ++ n ++ " at " ++ show sr
     _ -> return ()
 
 instance Resolvable (RequestT Type) where
@@ -72,8 +71,8 @@ instance Resolvable CallableDefT where
   resolve d@FuncDef{ inargs = is
                    , outarg = o
                    , callableBody = b } = do
-    let is' = Local 1 <$> is
-        o' = Local 1 o
+    let is' = Local <$> is
+        o' = Local o
     prevScope <- use scope
     zipWithM_ (define $ location d) is is'
     define (location d) o o'
@@ -83,8 +82,8 @@ instance Resolvable CallableDefT where
   resolve d@ProcDef{ inargs = is
                    , outargs = os
                    , callableBody = b } = do
-    let is' = Local 0 <$> is
-        os' = Local 0 <$> os
+    let is' = Local <$> is
+        os' = Local <$> os
     prevScope <- use scope
     zipWithM_ (define $ location d) is is'
     zipWithM_ (define $ location d) os os'
@@ -106,14 +105,12 @@ instance Resolvable StatementT where
       eitherResolve (Right a) = Right <$> resolve a
   resolve (Scope s r) = do
     prevState <- get
-    currentDepth += 1
     s' <- mapM resolve s
     put prevState
     return $ Scope s' r
   resolve (VarInit mut n mt me r) = do
     me' <- T.mapM resolve me
-    d <- use currentDepth
-    let n' = Local d n
+    let n' = Local n
     define r n n'
     return $ VarInit mut n' mt me' r
 

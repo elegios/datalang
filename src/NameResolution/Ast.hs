@@ -4,8 +4,7 @@ import Parser.Ast
 import qualified Data.Map as M
 
 data Resolved = Local
-                { depth :: Int
-                , name :: String
+                { name :: String
                 }
               | Global
                 { name :: String
