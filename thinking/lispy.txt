@@ -1,0 +1,335 @@
+// all "keywords" are builtin macros handled by the compiler
+import "Prelude" // builtin, default imported macro (that imports a namespace)
+
+type (Vec2 n) (n n) () // no accessors, n type argument
+type (Vec2 n) (n n) (
+	[x] -> [self 0]
+	[y] -> [self 1]
+	[lenSq] -> (dot self self)
+)
+
+func dot ((a (Vec2 n)) (b (Vec2 n))) c n {
+	= c (+ (* [a x] [b x]) (* [a y] [b y]))
+}
+
+proc dotP (a (Vec2 n) b (Vec2 n)) (c n) {
+	= c (+ (* [a x] [b x]) (* [a y] [b y]))
+}
+
+// file: c-interface
+
+export (
+	rand
+	sleep malloc
+	tb_init tb_shutdown 
+	tb_width tb_height
+	tb_clear tb_set_clear_attributes
+	tb_present
+	tb_set_cursor
+	tb_put_cell tb_change_cell
+	tb_peek_event tb_poll_event
+)
+
+importC (
+	sleep (proc (u32) ())
+	arc4random_uniform (func (i32) i32)
+	(malloc c_malloc) (func (u64) (ptr MineCell))
+	
+	(tb_init c_tb_init) (func () i32) 
+	tb_shutdown (proc () ())
+	
+	(tb_width c_tb_width) (func () i32) 
+	(tb_height c_tb_height) (func () i32) 
+
+	tb_clear (proc () ())
+	tb_set_clear_attributes (proc (i32 i32) ())
+
+	tb_present (proc () ())
+	
+	tb_set_cursor (proc (i32 i32) ())
+
+	tb_put_cell (proc (i32 i32 (ptr TBCell)) ())
+	tb_change_cell (proc (i32 i32 u32 u16 u16) ())
+
+	(tb_peek_event c_tb_peek_event) (func ((ptr TBEvent) i32) i32)
+	(tb_poll_event c_tb_poll_event) (func ((ptr TBEvent)) I32)
+)
+
+type TBCell (u32 u16 u16) (
+	['character] _0
+	['foreground] _1
+	['background] _2
+)
+
+struct TBCell ( // simple macro, translates to the above
+	character u32
+	foreground u16
+	background u16
+)
+
+struct TBEvent (
+	event_type u8
+	modifier u8
+	key u16
+	character u32
+	width i32
+	height i32
+	x i32
+	y i32
+)
+
+proc rand (upper : i32) (res : i32) {
+	= res (arc4random_uniform upper)
+}
+
+proc malloc (count) (p : (ptr _) success : bool) {
+	= p (c_malloc (* count 3)) // sizeof
+	= success (!= p null)
+}
+
+proc tb_init () (success : bool) {
+	= success (>= (c_tb_init) 0)
+}
+
+proc tb_width () (width : i32) {
+	= width (c_tb_width)
+}
+
+proc tb_height () (height : i32) {
+	= height (c_tb_height)
+}
+
+proc tb_peek_event (timeout : i32) (event : TBEvent success : bool) {
+	let res (c_tb_peek_event (ptr event) timeout)
+	= success (> res 0)
+}
+
+proc tb_poll_event () (event : TBEvent success : bool) {
+	= success (< 0 (c_tb_poll_event (ptr event)))
+}
+
+// file: main
+
+import "c-interface"
+
+exportC (
+	main (func () i32)
+)
+
+struct MineCell (
+	revealed bool
+	mine bool
+	marked bool
+)
+
+struct _MineGrid (
+	ptr (ptr MineCell)
+	width i32
+	height i32
+	mineCount i32
+)
+type MineGrid _MineGrid ( // no assertions yet
+	[x y] [[self 'p] (+ [self 'x] (* width y))]
+	
+	['iter] 0
+	['fromIter i] [[self p] i]
+	['isIter i] (< i (* width height))
+	['next i] (+ i 1)
+
+	['inside x y] (and (<= 0 x) (< x width) (<= 0 y) (< y height))
+)
+
+func main () exitCode : exitCode { // use different namespaces for types and values
+	play () (_ exitCode) // let in proc return not trivial anymore
+}
+
+proc play () (score exitCode) { // use : to add a type to a thing, let macro proc add a new name for a type otherwise
+	= score 0
+	tb_init () (let mut success)
+	if (not success) {
+		= exitCode 1
+		return
+	}
+	defer tb_shutdown () ()
+
+	let mut grid (to MineGrid '(25 25))
+	malloc (cast (* 25 25) u64) ([grid 'ptr] success)
+	if (not success) {
+		= exitCode 2
+		return
+	}
+
+	for it grid {
+		rand (7) (let r) // not sure how to do this
+		= it (struct MineCell 'mine (== r 0)) // macro, takes a type created as in struct and initializes given and not given fields
+		if [it 'mine] {
+			+= [grid 'mineCount] 1
+		}
+	}
+
+	loop () (grid score exitCode)
+}
+
+proc loop () (grid : MineGrid score exitCode) {
+	let mut success
+	let mut cur_x 0
+	let mut cur_y 0
+
+	while true {
+		{
+			let mut x 0
+			while (< x [grid 'width]) {
+				defer += x 1
+				let mut y 0
+				while (< y [grid 'height]) {
+					defer += y 1
+					drawAt (x y grid false) ()
+				}
+			}
+		}
+		drawAt (cur_x cur_y grid true)
+		tb_present () ()
+
+		tb_poll_event () (let event success)
+		if (not success) {
+			= exitCode 3
+			return
+		}
+		let mut xdiff 0
+		let mut ydiff 0
+		let mut doReveal false
+		let mut doMark false
+
+		if (== [event 'event_type] 1) {
+			// NOTE: key event
+      if (== [event 'key] (- 0xFFFF 18)) { // NOTE: arrow up // TODO: constants
+        ydiff = -1
+      } else if (== [event 'key] (- 0xFFFF 19)) { // NOTE: arrow down // TODO: switch/match
+        ydiff = 1
+      } else if (== [event 'key] (- 0xFFFF 20)) { // NOTE: arrow left // TODO: switch/match
+        xdiff = -1
+      } else if (== [event 'key] (- 0xFFFF 21)) { // NOTE: arrow right // TODO: switch/match
+        xdiff = 1
+      } else if (or (== [event 'key] 0x0D) (== [event 'key] 0x20)) { // NOTE: enter or space
+        doReveal = true
+      } else if (== [event 'character] 97) { // NOTE: a
+      	doMark = true
+      } else if (== [event 'key] 0x1B) { // NOTE: escape
+        success = true
+				return
+      }
+    } else {
+      // NOTE: don't handle these kinds of events
+    }
+
+		{
+			let cell [grid curr_x curr_y]
+			if (and doReveal (not [cell 'marked]) (not [cell 'revealed])) {
+				expandAround (cur_x cur_y) (grid)
+				if [cell 'mine] {
+					= success true
+					drawAt (cur_x cur_y grid false) ()
+					tb_present () ()
+					sleep (2) ()
+					return
+
+				} else {
+					+= score 1
+				}
+			}
+			if (and doMark (not [cell 'revealed])) {
+				= [[grid cur_x cur_y] 'marked] (not [[grid cur_x cur_y] 'marked])
+			}
+		}
+
+		drawAt (cur_x cur_y grid false) ()
+		= cur_x (min (max 0 (+ curr_x xdiff) (- [grid 'width] 1)))
+		= cur_y (min (max 0 (+ curr_y ydiff) (- [grid 'height] 1)))
+		drawAt (cur_x cur_y grid true) ()
+
+		tb_present () ()
+	}
+}
+
+drawAt (x : coord y : coord grid : MineGrid cursor : bool) {
+	let cell [grid x y]
+	let mut back 1
+	if [cell 'revealed] {
+		= back 0
+	}
+	if cursor {
+		= back 5
+	}
+
+	if [cell 'revealed] {
+		if [cell 'mine] {
+			tb_change_cell (x y 42 1 2) ()
+		} else {
+			let remaining (satisfied grid x y)
+			let mut fore 1
+			if remaining < 0 {
+				= fore 2
+			} else if remaining > 0 {
+				= fore 3
+			}
+			tb_change_cell (x y (+ 48 [grid 'countAround x y]) fore back) ()
+		}
+	} else {
+		if [cell 'marked] {
+			tb_change_cell (x y 70 2 back) ()
+		} else {
+			tb_change_cell (x y 32 1 back) ()
+		}
+	}
+}
+
+func min (a : n b : n) c : n {
+	if (< a b) {
+		= c a
+	} else {
+		= c b
+	}
+}
+func max (a : n b : n) c : n {
+	if (> a b) {
+		= c a
+	} else {
+		= c b
+	}
+}
+
+func countGrid (grid : MineGrid x : coord y : coord) count {
+	for currX (to IncInc '((- x 1) (+ x 1))) { // IncInc, convenience to loop with both ends included
+		for currY (to IncInc '((- y 1) (+ y 1))) {
+			if (or (and (== currX x) (== currY y)) (not [grid 'inside currX currY])) {
+				continue
+			}
+			if [[grid currX currY] 'mine] {
+				+= count 1
+			}
+		}
+	}
+}
+
+proc expandAround (x : coord y : coord) (grid : MineGrid) {
+	if (or (not [grid 'inside x y]) [[grid x y] 'revealed]) {
+		return
+	}
+
+	for currX (to IncInc '((- x 1) (+ x 1))) {
+		for currY (to IncInc '((- y 1) (+ y 1))) {
+			expandAround (currX currY) (grid)
+		}
+	}
+}
+
+func satisfied (grid : MineGrid x : coord y : coord) count {
+	= remaining (countGrid grid x y)
+	for currX (to IncInc '((- x 1) (+ x 1))) {
+		for currY (to IncInc '((- y 1) (+ y 1))) {
+			if (and [grid 'inside currX currY] [[grid currX currY] 'marked]) {
+				-= remaining 1
+			}
+		}
+	}
+}

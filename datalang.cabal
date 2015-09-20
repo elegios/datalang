@@ -57,10 +57,16 @@ executable datalang
   -- other-extensions:
 
   -- Other library packages from which modules are imported.
-  build-depends:       base >=4.7 && <4.8, llvm-general-pure, llvm-general, mtl, containers, lens, uniplate, parsec, filepath, text
+  build-depends:       base >=4.7 && <4.9, llvm-general-pure, llvm-general, mtl, containers, lens, uniplate, parsec, filepath, text
 
   -- Directories containing source files.
   hs-source-dirs:      src
 
   -- Base language which the package is written in.
   default-language:    Haskell2010
+
+executable lispy
+  main-is: LispyParser.hs
+  build-depends: base >=4.8 && <4.9, llvm-general-pure, llvm-general, mtl, containers, lens, uniplate, parsec, filepath, text, pretty
+  hs-source-dirs: src
+  default-language: Haskell2010
