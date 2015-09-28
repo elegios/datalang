@@ -1,11 +1,19 @@
-{-# LANGUAGE LambdaCase, FlexibleContexts #-}
+{-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE ViewPatterns #-}
+{-# LANGUAGE MultiParamTypeClasses #-}
+{-# LANGUAGE TupleSections #-}
+{-# LANGUAGE DeriveFunctor #-}
 
 module Main where
+
+import FancyAst (TagF(..), Location(..), SourceRange(..), SourceLoc(..), nowhere, UnTag(..))
 
 import Text.Parsec hiding (runParser, newline, token, tokens)
 import Data.Text.Lazy (Text)
 import Data.List (nub)
 import Data.Char (isAlpha, isDigit, isSpace, digitToInt)
+import Data.Functor.Foldable (Fix(..), cata)
 import Control.Monad (void)
 import Control.Monad.Reader (Reader, ask, local, runReader)
 import Control.Monad.Trans (lift)
@@ -38,19 +46,24 @@ main = do
 topParser :: Parser [[Token]]
 topParser = ignoreNewline True $ whiteSpace >> listHelper "" "" statement <* eof
 
-data Token = Identifier String
-           | Symbol String
-           | LiteralToken Literal
-           | Statements [[Token]]
-           | List [Token]
-           | MemberAccess [Token] deriving Show
-data Literal = IntLit Integer
-             | FloatLit Double
-             | BoolLit Bool
-             | StringLit String
-             | TupleLit [Token]
-             | UndefLit
-             | NullLit deriving Show
+type Token = Fix (TagF TokF Location)
+type LocTokF tok = TagF TokF Location tok
+data TokF tok = Identifier String
+              | Symbol String
+              | LiteralToken (Literal tok)
+              | Statements [[tok]]
+              | List [tok]
+              | MemberAccess [tok] deriving (Show, Functor)
+data Literal tok = IntLit Integer
+                 | FloatLit Double
+                 | BoolLit Bool
+                 | StringLit String
+                 | TupleLit [tok]
+                 | UndefLit
+                 | NullLit deriving (Show, Functor)
+
+instance UnTag TokF TokF where
+  untag = id
 
 ignoreNewline :: Bool -> Parser a -> Parser a
 ignoreNewline ignore = local $ const ignore
@@ -59,29 +72,29 @@ token :: Parser Token
 token = literal <|> symbol <|> identifier <|> statements <|> list <|> memberAccess
 
 list :: Parser Token
-list = List <$> listHelper "(" ")" token <?> "function call"
+list = tagPosition (List <$> listHelper "(" ")" token <?> "function call")
 
 statements :: Parser Token
-statements = Statements <$> listHelper "{" "}" statement <?> "block"
+statements = tagPosition (Statements <$> listHelper "{" "}" statement <?> "block")
 
 statement :: Parser [Token]
 statement = (ignoreNewline False $ token `sepEndBy` whiteSpace1) <?> "statement"
 
 memberAccess :: Parser Token
-memberAccess = MemberAccess <$> listHelper "[" "]" token <?> "member access"
+memberAccess = tagPosition (MemberAccess <$> listHelper "[" "]" token <?> "member access")
 
 listHelper :: String -> String -> Parser a -> Parser [a]
 listHelper start end listItem =
   ignoreNewline True . between (try (string start) >> whiteSpace) (string end) $ listItem `sepEndBy` whiteSpace1
 
 symbol :: Parser Token
-symbol = Symbol <$> (char '\'' >> many1 identifierCont <?> "symbol character") <?> "symbol"
+symbol = tagPosition (Symbol <$> (char '\'' >> many1 identifierCont <?> "symbol character") <?> "symbol")
 
 identifier :: Parser Token
-identifier = fmap Identifier $ (:) <$> identifierStart <*> many identifierCont
+identifier = tagPosition $ fmap Identifier $ (:) <$> identifierStart <*> many identifierCont
 
 literal :: Parser Token
-literal = LiteralToken <$> ((stringLiteral <?> "string") <|> tupleLiteral <|> number <|> keyword)
+literal = tagPosition $ LiteralToken <$> ((stringLiteral <?> "string") <|> tupleLiteral <|> number <|> keyword)
   where
     number = labels (either IntLit FloatLit <$> natFloat) ["int", "float"]
     keyword = try $ do
@@ -93,8 +106,18 @@ literal = LiteralToken <$> ((stringLiteral <?> "string") <|> tupleLiteral <|> nu
         "null" -> return NullLit
         _ -> fail ""
 
-tupleLiteral :: Parser Literal
+tupleLiteral :: Parser (Literal Token)
 tupleLiteral = TupleLit <$> listHelper "'(" ")" token <?> "tuple"
+
+tagPosition :: Parser (TokF Token) -> Parser Token
+tagPosition p = do
+  start <- toLoc <$> getPosition
+  res <- p
+  end <- toLoc <$> getPosition
+  return . Fix $ TagF (res, (origLoc start end))
+  where
+    toLoc pos = SourceLoc (sourceName pos) (sourceLine pos) (sourceColumn pos)
+    origLoc st en = OriginalLoc $ SourceRange st en
 
 newline :: Parser ()
 newline = skipMany $ satisfy isSpace
@@ -170,7 +193,7 @@ number base baseDigit = do
   let n = foldl (\x d -> base*x + toInteger (digitToInt d)) 0 digits
   seq n $ return n
 
-stringLiteral :: Parser Literal
+stringLiteral :: Parser (Literal Token)
 stringLiteral = fmap StringLit . between (char '"') (char '"' <?> "end of string")
   $ many stringChar
   where
@@ -207,7 +230,7 @@ stringLiteral = fmap StringLit . between (char '"') (char '"' <?> "end of string
               '\SYN','\ETB','\CAN','\SUB','\ESC','\DEL']
 
 pretty :: [[Token]] -> String
-pretty = P.render . tok . Statements
+pretty = P.render . cata alg . Fix . TagF . (, nowhere) . Statements
   where
     (<>) = (P.<>)
     ($+$) = (P.$+$)
@@ -216,18 +239,18 @@ pretty = P.render . tok . Statements
     hsep = P.hsep
     text = P.text
     sep = P.sep
-    tok :: Token -> P.Doc
-    tok (Statements stmnts) = text "{" $+$ nest 2 (vcat $ stmnt <$> stmnts) $+$ text "}"
-      where stmnt toks = hsep $ tok <$> toks
-    tok (Symbol s) = text "\'" <> text s
-    tok (Identifier s) = text s
-    tok (LiteralToken l) = lit l
-    tok (List toks) = text "(" <> sep (tok <$> toks) <> text ")"
-    tok (MemberAccess toks) = text "[" <> sep (tok <$> toks) <> text "]"
-    lit (IntLit i) = text $ show i
-    lit (FloatLit f) = text $ show f
-    lit (BoolLit b) = if b then text "true" else text "false"
-    lit (StringLit s) = text "\"" <> text s <> text "\""
-    lit (TupleLit toks) = text "'(" <> sep (tok <$> toks) <> text ")"
-    lit UndefLit = text "_"
-    lit NullLit = text "null"
+    u = untag
+    alg :: LocTokF P.Doc -> P.Doc
+    alg (u -> Statements stmnts) = text "{" $+$ nest 2 (vcat $ hsep <$> stmnts) $+$ text "}"
+    alg (u -> Symbol s) = text "\'" <> text s
+    alg (u -> Identifier s) = text s
+    alg (u -> LiteralToken l) = case l of
+      IntLit i -> text $ show i
+      FloatLit f -> text $ show f
+      BoolLit b -> if b then text "true" else text "false"
+      StringLit s -> text "\"" <> text s <> text "\""
+      TupleLit toks -> text "'(" <> sep toks <> text ")"
+      UndefLit -> text "_"
+      NullLit -> text "null"
+    alg (u -> List toks) = text "(" <> sep toks <> text ")"
+    alg (u -> MemberAccess toks) = text "[" <> sep toks <> text "]"
