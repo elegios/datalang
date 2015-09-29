@@ -4,7 +4,7 @@
 {-# LANGUAGE DeriveFunctor #-}
 {-# LANGUAGE UndecidableInstances #-}
 
-module FancyAst where
+module Lispy.Ast where
   
 data SourceLoc = SourceLoc FilePath Line Column
 type Line = Int

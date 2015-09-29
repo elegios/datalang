@@ -66,7 +66,7 @@ executable datalang
   default-language:    Haskell2010
 
 executable lispy
-  main-is: LispyParser.hs
+  main-is: Lispy/Main.hs
   build-depends: base >=4.8 && <4.9, llvm-general-pure, llvm-general, mtl, containers, lens, uniplate, parsec, filepath, text, pretty, recursion-schemes
   hs-source-dirs: src
   default-language: Haskell2010

@@ -1,13 +1,10 @@
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE FlexibleContexts #-}
-{-# LANGUAGE ViewPatterns #-}
-{-# LANGUAGE MultiParamTypeClasses #-}
-{-# LANGUAGE TupleSections #-}
-{-# LANGUAGE DeriveFunctor #-}
 
-module Main where
+module Lispy.Parser (parseFile, pretty) where
 
-import FancyAst (TagF(..), Location(..), SourceRange(..), SourceLoc(..), nowhere, UnTag(..))
+import Lispy.Ast (TagF(..), Location(..), SourceRange(..), SourceLoc(..), nowhere, UnTag(..))
+import Lispy.Parser.Data
 
 import Text.Parsec hiding (runParser, newline, token, tokens)
 import Data.Text.Lazy (Text)
@@ -17,13 +14,12 @@ import Data.Functor.Foldable (Fix(..), cata)
 import Control.Monad (void)
 import Control.Monad.Reader (Reader, ask, local, runReader)
 import Control.Monad.Trans (lift)
-import System.Environment (getArgs)
 import qualified Data.Text.Lazy.IO as LIO
 import qualified Text.PrettyPrint as P
 
 lineComment :: String
 lineComment = "//"
-multiComment:: (String, String)
+multiComment :: (String, String)
 multiComment = ("/*", "*/")
 identifierStart :: Parser Char
 identifierCont :: Parser Char
@@ -35,35 +31,14 @@ identifierCont :: Parser Char
 
 type Parser a = ParsecT Text () (Reader Bool) a
 
+parseFile :: FilePath -> IO (Either ParseError [[Token]])
+parseFile path = runParser topParser path <$> LIO.readFile path
+
 runParser :: Parser a -> FilePath -> Text -> Either ParseError a
 runParser p path text = flip runReader undefined $ runParserT p () path text
 
-main :: IO ()
-main = do
-  path : _ <- getArgs
-  LIO.readFile path >>= putStrLn . either show pretty . runParser topParser path
-
 topParser :: Parser [[Token]]
 topParser = ignoreNewline True $ whiteSpace >> listHelper "" "" statement <* eof
-
-type Token = Fix (TagF TokF Location)
-type LocTokF tok = TagF TokF Location tok
-data TokF tok = Identifier String
-              | Symbol String
-              | LiteralToken (Literal tok)
-              | Statements [[tok]]
-              | List [tok]
-              | MemberAccess [tok] deriving (Show, Functor)
-data Literal tok = IntLit Integer
-                 | FloatLit Double
-                 | BoolLit Bool
-                 | StringLit String
-                 | TupleLit [tok]
-                 | UndefLit
-                 | NullLit deriving (Show, Functor)
-
-instance UnTag TokF TokF where
-  untag = id
 
 ignoreNewline :: Bool -> Parser a -> Parser a
 ignoreNewline ignore = local $ const ignore
@@ -229,28 +204,3 @@ stringLiteral = fmap StringLit . between (char '"') (char '"' <?> "end of string
               '\BEL','\DLE','\DC1','\DC2','\DC3','\DC4','\NAK',
               '\SYN','\ETB','\CAN','\SUB','\ESC','\DEL']
 
-pretty :: [[Token]] -> String
-pretty = P.render . cata alg . Fix . TagF . (, nowhere) . Statements
-  where
-    (<>) = (P.<>)
-    ($+$) = (P.$+$)
-    nest = P.nest
-    vcat = P.vcat
-    hsep = P.hsep
-    text = P.text
-    sep = P.sep
-    u = untag
-    alg :: LocTokF P.Doc -> P.Doc
-    alg (u -> Statements stmnts) = text "{" $+$ nest 2 (vcat $ hsep <$> stmnts) $+$ text "}"
-    alg (u -> Symbol s) = text "\'" <> text s
-    alg (u -> Identifier s) = text s
-    alg (u -> LiteralToken l) = case l of
-      IntLit i -> text $ show i
-      FloatLit f -> text $ show f
-      BoolLit b -> if b then text "true" else text "false"
-      StringLit s -> text "\"" <> text s <> text "\""
-      TupleLit toks -> text "'(" <> sep toks <> text ")"
-      UndefLit -> text "_"
-      NullLit -> text "null"
-    alg (u -> List toks) = text "(" <> sep toks <> text ")"
-    alg (u -> MemberAccess toks) = text "[" <> sep toks <> text "]"
