@@ -24,8 +24,8 @@ multiComment = ("/*", "*/")
 identifierStart :: Parser Char
 identifierCont :: Parser Char
 (identifierStart, identifierCont) =
-  ( satisfy $ isAlpha `or` (`elem` "+-/*:-_&|\\<>=?!")
-  , satisfy $ isAlpha `or` (`elem` "+-/*:-_&|\\<>=?!") `or` isDigit)
+  ( satisfy $ isAlpha `or` (`elem` "+-/*:-_&|\\<>=?!.")
+  , satisfy $ isAlpha `or` (`elem` "+-/*:-_&|\\<>=?!'.") `or` isDigit)
   where
     or f g c = f c || g c
 
@@ -47,7 +47,7 @@ token :: Parser Token
 token = literal <|> symbol <|> identifier <|> statements <|> list <|> memberAccess
 
 list :: Parser Token
-list = tagPosition (List <$> listHelper "(" ")" token <?> "function call")
+list = tagPosition (List <$> listHelper "(" ")" token <?> "list")
 
 statements :: Parser Token
 statements = tagPosition (Statements <$> listHelper "{" "}" statement <?> "block")
@@ -56,7 +56,8 @@ statement :: Parser [Token]
 statement = (ignoreNewline False $ token `sepEndBy` whiteSpace1) <?> "statement"
 
 memberAccess :: Parser Token
-memberAccess = tagPosition (MemberAccess <$> listHelper "[" "]" token <?> "member access")
+memberAccess = tagPosition (List . (acc:) <$> listHelper "[" "]" token <?> "member access")
+  where acc = Fix $ TagF (Identifier ".", nowhere)
 
 listHelper :: String -> String -> Parser a -> Parser [a]
 listHelper start end listItem =

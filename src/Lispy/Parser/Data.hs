@@ -15,8 +15,7 @@ data TokF tok = Identifier String
               | Symbol String
               | LiteralToken (Literal tok)
               | Statements [[tok]]
-              | List [tok]
-              | MemberAccess [tok] deriving (Show, Functor)
+              | List [tok] deriving (Show, Functor)
 data Literal tok = IntLit Integer
                  | FloatLit Double
                  | BoolLit Bool
@@ -52,4 +51,3 @@ pretty = P.render . cata alg . Fix . TagF . (, nowhere) . Statements
       UndefLit -> text "_"
       NullLit -> text "null"
     alg (u -> List toks) = text "(" <> sep toks <> text ")"
-    alg (u -> MemberAccess toks) = text "[" <> sep toks <> text "]"
